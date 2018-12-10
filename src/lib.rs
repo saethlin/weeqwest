@@ -39,6 +39,7 @@ impl From<httparse::Error> for Error {
 
 /// This encapsulates the TCP-level connection, some connection
 /// state, and the underlying TLS-level session.
+/// This struct is taken almost entirely from ctz/rustls/examples/tlsclient.rs
 struct TlsClient {
     socket: TcpStream,
     closing: bool,
