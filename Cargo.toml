@@ -1,0 +1,19 @@
+[package]
+name = "tiny_reqwest"
+version = "0.1.0"
+authors = ["Ben Kimock <kimockb@gmail.com>"]
+edition = "2018"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+mio = {version = "0.6", default-features = false}
+rustls = {version = "0.14", default-features = false}
+webpki = "0.18"
+webpki-roots = "0.15"
+httparse = "1.0"
+
+[profile.release]
+lto = true
+panic = "abort"
