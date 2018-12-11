@@ -1,12 +1,11 @@
-use std::io::{self, Read, Write};
-use std::sync::Arc;
-
+use futures::sync::oneshot;
 use mio::event::Event;
 use mio::net::TcpStream;
-
 use rustls::Session;
+use std::io::{self, Read, Write};
+use std::sync::{mpsc, Arc};
 
-const CLIENT: mio::Token = mio::Token(0);
+const NEW_CLIENT: mio::Token = mio::Token(0);
 
 lazy_static::lazy_static! {
     pub static ref CONFIG: Arc<rustls::ClientConfig> = {
@@ -53,14 +52,14 @@ struct TlsClient {
     closing: bool,
     clean_closure: bool,
     tls_session: rustls::ClientSession,
+    buf: Vec<u8>,
+    pub token: mio::Token,
 }
 
 impl TlsClient {
-    fn ready(&mut self, poll: &mut mio::Poll, ev: &Event, buf: &mut Vec<u8>) -> Result<(), Error> {
-        assert_eq!(ev.token(), CLIENT);
-
+    fn ready(&mut self, poll: &mut mio::Poll, ev: &Event) -> Result<(), Error> {
         if ev.readiness().is_readable() {
-            self.do_read(buf)?;
+            self.do_read()?;
         }
 
         if ev.readiness().is_writable() {
@@ -95,11 +94,13 @@ impl TlsClient {
             closing: false,
             clean_closure: false,
             tls_session: rustls::ClientSession::new(cfg, hostname),
+            buf: Vec::new(),
+            token: mio::Token(0), // invalid value
         }
     }
 
     /// We're ready to do a read.
-    fn do_read(&mut self, buf: &mut Vec<u8>) -> Result<(), Error> {
+    fn do_read(&mut self) -> Result<(), Error> {
         let bytes_read = self.tls_session.read_tls(&mut self.socket);
         match bytes_read {
             // Ready but no data
@@ -128,7 +129,7 @@ impl TlsClient {
         // Having read some TLS data, and processed any new messages,
         // we might have new plaintext as a result.
         // Read it.
-        let bytes_read = self.tls_session.read_to_end(buf);
+        let bytes_read = self.tls_session.read_to_end(&mut self.buf);
 
         // If that fails, the peer might have started a clean TLS-level
         // session closure.
@@ -156,7 +157,7 @@ impl TlsClient {
     fn register(&self, poll: &mut mio::Poll) -> io::Result<()> {
         poll.register(
             &self.socket,
-            CLIENT,
+            self.token,
             self.ready_interest(),
             mio::PollOpt::level() | mio::PollOpt::oneshot(),
         )
@@ -165,7 +166,7 @@ impl TlsClient {
     fn reregister(&self, poll: &mut mio::Poll) -> io::Result<()> {
         poll.reregister(
             &self.socket,
-            CLIENT,
+            self.token,
             self.ready_interest(),
             mio::PollOpt::level() | mio::PollOpt::oneshot(),
         )
@@ -189,51 +190,13 @@ impl TlsClient {
     fn is_closed(&self) -> bool {
         self.closing
     }
+
+    fn bytes_read(&self) -> &[u8] {
+        self.buf.as_slice()
+    }
 }
 
-/// Make an HTTPS GET request
-/// ```rust
-/// let bytes = tiny_reqwest::get("api.slack.com", "/api/api.test?foo=bar").unwrap();
-/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", bytes.as_slice());
-/// ```
-pub fn get(hostname: &str, path: &str) -> Result<Vec<u8>, Error> {
-    use std::net::ToSocketAddrs;
-    let addr = (hostname, 443)
-        .to_socket_addrs()
-        .map(|mut addrs| addrs.next())?
-        .ok_or(Error::IpLookupFailed)?;
-
-    let sock = TcpStream::connect(&addr)?;
-    let dns_name =
-        webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
-    let mut tlsclient = TlsClient::new(sock, dns_name, &CONFIG);
-
-    write!(
-        tlsclient,
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: \
-         close\r\nAccept-Encoding: identity\r\n\r\n",
-        path, hostname
-    )?;
-
-    let mut poll = mio::Poll::new()?;
-    let mut events = mio::Events::with_capacity(4);
-    tlsclient.register(&mut poll)?;
-
-    let mut incoming_bytes = Vec::new();
-    loop {
-        poll.poll(&mut events, None)?;
-
-        for ev in events.iter() {
-            tlsclient.ready(&mut poll, &ev, &mut incoming_bytes)?;
-        }
-
-        // Calls to ready may reveal that the TLS session is over, so we must break directly after
-        if tlsclient.is_closed() {
-            break;
-        }
-    }
-
-    // Parse the response
+pub fn parse_body(incoming_bytes: &[u8]) -> Result<Vec<u8>, httparse::Error> {
     // Reserve enough space to hold all the incoming bytes so no reallocation occurs
     let mut body = Vec::with_capacity(incoming_bytes.len());
 
@@ -265,5 +228,111 @@ pub fn get(hostname: &str, path: &str) -> Result<Vec<u8>, Error> {
         httparse::Status::Partial => {
             panic!("Entire request should have been read already but wasn't")
         }
+    }
+}
+
+/// ```rust
+/// use futures::Future;
+/// let client = tiny_reqwest::Client::new().unwrap();
+/// let handle = client.get("api.slack.com", "/api/api.test?foo=bar").unwrap();
+/// // Some time later
+/// let bytes = handle.wait().unwrap();
+/// let body = tiny_reqwest::parse_body(&bytes).unwrap();
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", body.as_slice());
+pub struct Client {
+    sender: mpsc::Sender<(TlsClient, oneshot::Sender<Vec<u8>>)>,
+    readiness: mio::SetReadiness,
+}
+
+impl Client {
+    pub fn get(&self, hostname: &str, path: &str) -> Result<oneshot::Receiver<Vec<u8>>, Error> {
+        use std::net::ToSocketAddrs;
+        let addr = (hostname, 443)
+            .to_socket_addrs()
+            .map(|mut addrs| addrs.next())?
+            .ok_or(Error::IpLookupFailed)?;
+
+        let sock = TcpStream::connect(&addr)?;
+        let dns_name =
+            webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
+        let mut tlsclient = TlsClient::new(sock, dns_name, &CONFIG);
+
+        write!(
+            tlsclient,
+            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: \
+             close\r\nAccept-Encoding: identity\r\n\r\n",
+            path, hostname
+        )?;
+
+        let (send, recv) = futures::sync::oneshot::channel();
+
+        self.sender.send((tlsclient, send)).unwrap();
+        self.readiness.set_readiness(mio::Ready::readable())?;
+
+        Ok(recv)
+    }
+
+    pub fn new() -> io::Result<Self> {
+        let mut events = mio::Events::with_capacity(4);
+        let (registration, readiness) = mio::Registration::new2();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut clients: Vec<(TlsClient, futures::sync::oneshot::Sender<Vec<u8>>)> = Vec::new();
+
+        std::thread::spawn(move || {
+            let mut used_tokens: Vec<usize> = Vec::new();
+
+            let mut poll = mio::Poll::new().unwrap();
+            poll.register(
+                &registration,
+                NEW_CLIENT,
+                mio::Ready::readable(),
+                mio::PollOpt::edge(),
+            )
+            .unwrap();
+
+            loop {
+                poll.poll(&mut events, None).unwrap();
+
+                for ev in events.iter() {
+                    if ev.token() == NEW_CLIENT {
+                        // A new client has been attached to the poll loop
+                        let (mut client, output): (TlsClient, _) = receiver.recv().unwrap();
+                        // Pick an unused token value for the new client
+                        for v in 1..usize::max_value() {
+                            if !used_tokens.contains(&v) {
+                                client.token = mio::Token(v);
+                                used_tokens.push(v);
+                                break;
+                            }
+                        }
+                        client.register(&mut poll).unwrap();
+                        clients.push((client, output));
+                    } else {
+                        // Else, we got an event for a currently running client. Handle it.
+                        for (c, _) in &mut clients {
+                            if c.token == ev.token() {
+                                c.ready(&mut poll, &ev).unwrap();
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Events have been handled, see if any clients are done
+                // This operation is a drain_filter
+                let mut i = 0;
+                while i != clients.len() {
+                    if clients[i].0.is_closed() {
+                        let (client, output_channel) = clients.remove(i);
+                        output_channel.send(client.bytes_read().to_vec()).unwrap();
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        });
+
+        Ok(Self { sender, readiness })
     }
 }

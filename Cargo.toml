@@ -14,6 +14,7 @@ webpki = "0.18"
 webpki-roots = "0.15"
 httparse = "1.0"
 lazy_static = "1.0"
+futures = "0.1"
 
 [profile.release]
 lto = true
