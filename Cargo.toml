@@ -13,6 +13,7 @@ rustls = {version = "0.14", default-features = false}
 webpki = "0.18"
 webpki-roots = "0.15"
 httparse = "1.0"
+lazy_static = "1.0"
 
 [profile.release]
 lto = true

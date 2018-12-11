@@ -1,6 +1,4 @@
-use std::io;
-use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 
 use mio::event::Event;
@@ -9,6 +7,16 @@ use mio::net::TcpStream;
 use rustls::Session;
 
 const CLIENT: mio::Token = mio::Token(0);
+
+lazy_static::lazy_static! {
+    pub static ref CONFIG: Arc<rustls::ClientConfig> = {
+        let mut config = rustls::ClientConfig::new();
+        config
+            .root_store
+            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+        Arc::new(config)
+    };
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -73,12 +81,6 @@ impl io::Write for TlsClient {
 
     fn flush(&mut self) -> io::Result<()> {
         self.tls_session.flush()
-    }
-}
-
-impl io::Read for TlsClient {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.tls_session.read(bytes)
     }
 }
 
@@ -189,31 +191,22 @@ impl TlsClient {
     }
 }
 
-fn lookup_ipv4(host: &str, port: u16) -> io::Result<Option<SocketAddr>> {
-    use std::net::ToSocketAddrs;
-    (host, port).to_socket_addrs().map(|mut addrs| addrs.next())
-}
-
-/// Parse some arguments, then make a TLS client connection
-/// somewhere.
+/// Make an HTTPS GET request
+/// ```rust
+/// let bytes = tiny_reqwest::get("api.slack.com", "/api/api.test?foo=bar").unwrap();
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", bytes.as_slice());
+/// ```
 pub fn get(hostname: &str, path: &str) -> Result<Vec<u8>, Error> {
-    let port = 443;
-    let addr = lookup_ipv4(hostname, port)?.ok_or(Error::IpLookupFailed)?;
-
-    let config = {
-        let mut config = rustls::ClientConfig::new();
-
-        config
-            .root_store
-            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
-
-        Arc::new(config)
-    };
+    use std::net::ToSocketAddrs;
+    let addr = (hostname, 443)
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.next())?
+        .ok_or(Error::IpLookupFailed)?;
 
     let sock = TcpStream::connect(&addr)?;
     let dns_name =
         webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
-    let mut tlsclient = TlsClient::new(sock, dns_name, &config);
+    let mut tlsclient = TlsClient::new(sock, dns_name, &CONFIG);
 
     write!(
         tlsclient,
@@ -234,6 +227,7 @@ pub fn get(hostname: &str, path: &str) -> Result<Vec<u8>, Error> {
             tlsclient.ready(&mut poll, &ev, &mut incoming_bytes)?;
         }
 
+        // Calls to ready may reveal that the TLS session is over, so we must break directly after
         if tlsclient.is_closed() {
             break;
         }
@@ -271,18 +265,5 @@ pub fn get(hostname: &str, path: &str) -> Result<Vec<u8>, Error> {
         httparse::Status::Partial => {
             panic!("Entire request should have been read already but wasn't")
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    #[test]
-    fn main() {
-        let bytes = get("api.slack.com", "/api/api.test").unwrap();
-        let json = String::from_utf8(bytes).unwrap();
-        println!("{}", json.len());
     }
 }
