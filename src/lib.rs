@@ -273,16 +273,14 @@ impl Client {
     }
 
     pub fn new() -> io::Result<Self> {
-        let mut events = mio::Events::with_capacity(4);
         let (registration, readiness) = mio::Registration::new2();
-
         let (sender, receiver) = std::sync::mpsc::channel();
-        let mut clients: Vec<(TlsClient, futures::sync::oneshot::Sender<Vec<u8>>)> = Vec::new();
 
         std::thread::spawn(move || {
-            let mut used_tokens: Vec<usize> = Vec::new();
+            let mut clients: Vec<(TlsClient, oneshot::Sender<Vec<u8>>)> = Vec::new();
 
             let mut poll = mio::Poll::new().unwrap();
+            let mut events = mio::Events::with_capacity(4);
             poll.register(
                 &registration,
                 NEW_CLIENT,
@@ -300,22 +298,19 @@ impl Client {
                         let (mut client, output): (TlsClient, _) = receiver.recv().unwrap();
                         // Pick an unused token value for the new client
                         for v in 1..usize::max_value() {
-                            if !used_tokens.contains(&v) {
+                            if !clients.iter().any(|c| c.0.token == mio::Token(v)) {
                                 client.token = mio::Token(v);
-                                used_tokens.push(v);
                                 break;
                             }
                         }
                         client.register(&mut poll).unwrap();
                         clients.push((client, output));
                     } else {
-                        // Else, we got an event for a currently running client. Handle it.
-                        for (c, _) in &mut clients {
-                            if c.token == ev.token() {
-                                c.ready(&mut poll, &ev).unwrap();
-                                break;
-                            }
-                        }
+                        // Else, we got an event for a currently running client. Find and handle it
+                        clients
+                            .iter_mut()
+                            .find(|(c, _)| c.token == ev.token())
+                            .map(|(c, _)| c.ready(&mut poll, &ev).unwrap());
                     }
                 }
 
