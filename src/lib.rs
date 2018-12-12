@@ -1,252 +1,72 @@
 use futures::sync::oneshot;
-use mio::event::Event;
 use mio::net::TcpStream;
-use rustls::Session;
-use std::io::{self, Read, Write};
-use std::sync::{mpsc, Arc};
+use std::io::Write;
+use std::net::ToSocketAddrs;
+use std::sync::mpsc;
+
+mod error;
+mod tls;
+pub use crate::error::Error;
+use crate::tls::TlsClient;
 
 const NEW_CLIENT: mio::Token = mio::Token(0);
 
-lazy_static::lazy_static! {
-    pub static ref CONFIG: Arc<rustls::ClientConfig> = {
-        let mut config = rustls::ClientConfig::new();
-        config
-            .root_store
-            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
-        Arc::new(config)
-    };
-}
+pub fn get(hostname: &str, path: &str) -> Result<Response, Error> {
+    let addr = (hostname, 443)
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.next())?
+        .ok_or(Error::IpLookupFailed)?;
 
-#[derive(Debug)]
-pub enum Error {
-    Io(io::Error),
-    Tls(rustls::TLSError),
-    Parse(httparse::Error),
-    InvalidHostname,
-    IpLookupFailed,
-}
+    let sock = TcpStream::connect(&addr)?;
+    let dns_name =
+        webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
+    let mut tlsclient = TlsClient::new(sock, dns_name);
+    write!(
+        tlsclient,
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: \
+         close\r\nAccept-Encoding: identity\r\n\r\n",
+        path, hostname
+    )?;
 
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Error {
-        Error::Io(e)
-    }
-}
-
-impl From<rustls::TLSError> for Error {
-    fn from(e: rustls::TLSError) -> Error {
-        Error::Tls(e)
-    }
-}
-
-impl From<httparse::Error> for Error {
-    fn from(e: httparse::Error) -> Error {
-        Error::Parse(e)
-    }
-}
-
-/// This encapsulates the TCP-level connection, some connection
-/// state, and the underlying TLS-level session.
-/// This struct is taken almost entirely from ctz/rustls/examples/tlsclient.rs
-struct TlsClient {
-    socket: TcpStream,
-    closing: bool,
-    clean_closure: bool,
-    tls_session: rustls::ClientSession,
-    buf: Vec<u8>,
-    pub token: mio::Token,
-}
-
-impl TlsClient {
-    fn ready(&mut self, poll: &mut mio::Poll, ev: &Event) -> Result<(), Error> {
-        if ev.readiness().is_readable() {
-            self.do_read()?;
+    let mut poll = mio::Poll::new()?;
+    let mut events = mio::Events::with_capacity(4);
+    tlsclient.register(&mut poll)?;
+    loop {
+        poll.poll(&mut events, None)?;
+        for ev in events.iter() {
+            tlsclient.ready(&mut poll, &ev)?;
         }
-
-        if ev.readiness().is_writable() {
-            self.do_write()?;
-        }
-
-        self.reregister(poll)?;
-
-        Ok(())
-    }
-}
-
-/// We implement `io::Write` and pass through to the TLS session
-impl io::Write for TlsClient {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.tls_session.write(bytes)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.tls_session.flush()
-    }
-}
-
-impl TlsClient {
-    fn new(
-        sock: TcpStream,
-        hostname: webpki::DNSNameRef,
-        cfg: &Arc<rustls::ClientConfig>,
-    ) -> TlsClient {
-        TlsClient {
-            socket: sock,
-            closing: false,
-            clean_closure: false,
-            tls_session: rustls::ClientSession::new(cfg, hostname),
-            buf: Vec::new(),
-            token: mio::Token(0), // invalid value
+        if tlsclient.is_closed() {
+            break;
         }
     }
 
-    /// We're ready to do a read.
-    fn do_read(&mut self) -> Result<(), Error> {
-        let bytes_read = self.tls_session.read_tls(&mut self.socket);
-        match bytes_read {
-            // Ready but no data
-            Ok(0) => {
-                self.closing = true;
-                self.clean_closure = true;
-                return Ok(());
-            }
-            // Underlying TCP connection is broken
-            Err(e) => {
-                self.closing = true;
-                return Err(Error::Io(e));
-            }
-            _ => {}
-        }
-
-        // Reading some TLS data might have yielded new TLS
-        // messages to process.  Errors from this indicate
-        // TLS protocol problems and are fatal.
-        let processed = self.tls_session.process_new_packets();
-        if let Err(e) = processed {
-            self.closing = true;
-            return Err(Error::Tls(e));
-        }
-
-        // Having read some TLS data, and processed any new messages,
-        // we might have new plaintext as a result.
-        // Read it.
-        let bytes_read = self.tls_session.read_to_end(&mut self.buf);
-
-        // If that fails, the peer might have started a clean TLS-level
-        // session closure.
-        if let Err(e) = bytes_read {
-            self.clean_closure = e.kind() == io::ErrorKind::ConnectionAborted;
-            self.closing = true;
-            if self.clean_closure {
-                Ok(())
-            } else {
-                Err(Error::Io(e))
-            }
-        } else {
-            Ok(())
-        }
-    }
-
-    // Discards the usize that tells us how many bytes were written
-    fn do_write(&mut self) -> io::Result<()> {
-        while self.tls_session.wants_write() {
-            self.tls_session.write_tls(&mut self.socket)?;
-        }
-        Ok(())
-    }
-
-    fn register(&self, poll: &mut mio::Poll) -> io::Result<()> {
-        poll.register(
-            &self.socket,
-            self.token,
-            self.ready_interest(),
-            mio::PollOpt::level() | mio::PollOpt::oneshot(),
-        )
-    }
-
-    fn reregister(&self, poll: &mut mio::Poll) -> io::Result<()> {
-        poll.reregister(
-            &self.socket,
-            self.token,
-            self.ready_interest(),
-            mio::PollOpt::level() | mio::PollOpt::oneshot(),
-        )
-    }
-
-    // Use wants_read/wants_write to register for different mio-level
-    // IO readiness events.
-    fn ready_interest(&self) -> mio::Ready {
-        let rd = self.tls_session.wants_read();
-        let wr = self.tls_session.wants_write();
-
-        if rd && wr {
-            mio::Ready::readable() | mio::Ready::writable()
-        } else if wr {
-            mio::Ready::writable()
-        } else {
-            mio::Ready::readable()
-        }
-    }
-
-    fn is_closed(&self) -> bool {
-        self.closing
-    }
-
-    fn bytes_read(&self) -> &[u8] {
-        self.buf.as_slice()
-    }
+    let raw = tlsclient.take_bytes();
+    let body = parse_body_from(&raw)?;
+    Ok(Response { raw, body })
 }
 
-pub fn parse_body(incoming_bytes: &[u8]) -> Result<Vec<u8>, httparse::Error> {
-    // Reserve enough space to hold all the incoming bytes so no reallocation occurs
-    let mut body = Vec::with_capacity(incoming_bytes.len());
-
-    // Read the headers, increasing storage if needed
-    let mut headers = vec![httparse::EMPTY_HEADER; 256];
-    let mut req = httparse::Response::new(&mut headers);
-    while let Err(httparse::Error::TooManyHeaders) = req.parse(&incoming_bytes) {
-        headers.extend_from_slice(&[httparse::EMPTY_HEADER; 256]);
-        req = httparse::Response::new(&mut headers);
-    }
-
-    // Initial parse fills out the request struct and jumps to the beginning of the chunks
-    match req.parse(&incoming_bytes)? {
-        httparse::Status::Complete(len) => {
-            let mut remaining = &incoming_bytes[len..];
-
-            // Keep parsing until we run out of chunks, or have a parse error
-            while let Ok(httparse::Status::Complete((stopped, chunksize))) =
-                httparse::parse_chunk_size(remaining)
-            {
-                let end = chunksize as usize + stopped;
-                body.extend(&remaining[stopped..chunksize as usize + stopped]);
-                remaining = &remaining[end..];
-            }
-
-            Ok(body)
-        }
-
-        httparse::Status::Partial => {
-            panic!("Entire request should have been read already but wasn't")
-        }
-    }
-}
-
+/// A `Client` to make HTTP requests with.
+///
+/// A `Client` is a handle to a background thread that manages a mio Poll, and can be used to
+/// make multiple requests asynchronously. If you only need to make one request or don't need
+/// asynchronicity, consider using the free functions which will run a rustls session on the
+/// current thread.
+///
 /// ```rust
-/// use futures::Future;
 /// let client = tiny_reqwest::Client::new().unwrap();
 /// let handle = client.get("api.slack.com", "/api/api.test?foo=bar").unwrap();
 /// // Some time later
-/// let bytes = handle.wait().unwrap();
-/// let body = tiny_reqwest::parse_body(&bytes).unwrap();
+/// let body = handle.wait().body().unwrap();
 /// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", body.as_slice());
+/// ```
 pub struct Client {
     sender: mpsc::Sender<(TlsClient, oneshot::Sender<Vec<u8>>)>,
     readiness: mio::SetReadiness,
 }
 
 impl Client {
-    pub fn get(&self, hostname: &str, path: &str) -> Result<oneshot::Receiver<Vec<u8>>, Error> {
-        use std::net::ToSocketAddrs;
+    pub fn get(&self, hostname: &str, path: &str) -> Result<PendingRequest, Error> {
         let addr = (hostname, 443)
             .to_socket_addrs()
             .map(|mut addrs| addrs.next())?
@@ -255,7 +75,7 @@ impl Client {
         let sock = TcpStream::connect(&addr)?;
         let dns_name =
             webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
-        let mut tlsclient = TlsClient::new(sock, dns_name, &CONFIG);
+        let mut tlsclient = TlsClient::new(sock, dns_name);
 
         write!(
             tlsclient,
@@ -264,15 +84,15 @@ impl Client {
             path, hostname
         )?;
 
-        let (send, recv) = futures::sync::oneshot::channel();
+        let (sender, receiver) = oneshot::channel();
 
-        self.sender.send((tlsclient, send)).unwrap();
+        self.sender.send((tlsclient, sender)).unwrap();
         self.readiness.set_readiness(mio::Ready::readable())?;
 
-        Ok(recv)
+        Ok(PendingRequest { receiver })
     }
 
-    pub fn new() -> io::Result<Self> {
+    pub fn new() -> Self {
         let (registration, readiness) = mio::Registration::new2();
         let (sender, receiver) = std::sync::mpsc::channel();
 
@@ -310,7 +130,10 @@ impl Client {
                         clients
                             .iter_mut()
                             .find(|(c, _)| c.token == ev.token())
-                            .map(|(c, _)| c.ready(&mut poll, &ev).unwrap());
+                            .unwrap()
+                            .0
+                            .ready(&mut poll, &ev)
+                            .unwrap();
                     }
                 }
 
@@ -320,7 +143,7 @@ impl Client {
                 while i != clients.len() {
                     if clients[i].0.is_closed() {
                         let (client, output_channel) = clients.remove(i);
-                        output_channel.send(client.bytes_read().to_vec()).unwrap();
+                        output_channel.send(client.take_bytes()).unwrap();
                     } else {
                         i += 1;
                     }
@@ -328,6 +151,78 @@ impl Client {
             }
         });
 
-        Ok(Self { sender, readiness })
+        Self { sender, readiness }
+    }
+}
+
+pub struct PendingRequest {
+    receiver: oneshot::Receiver<Vec<u8>>,
+}
+
+fn parse_body_from(raw: &[u8]) -> Result<Vec<u8>, httparse::Error> {
+    // Reserve enough space to hold all the incoming bytes so no reallocation occurs
+    let mut body = Vec::with_capacity(raw.len());
+
+    // Read the headers, increasing storage if needed
+    let mut headers = vec![httparse::EMPTY_HEADER; 256];
+    let mut req = httparse::Response::new(&mut headers);
+    while let Err(httparse::Error::TooManyHeaders) = req.parse(&raw) {
+        headers.extend_from_slice(&[httparse::EMPTY_HEADER; 256]);
+        req = httparse::Response::new(&mut headers);
+    }
+
+    // Initial parse fills out the request struct and jumps to the beginning of the chunks
+    let body = match req.parse(&raw)? {
+        httparse::Status::Complete(len) => {
+            let mut remaining = &raw[len..];
+
+            // Keep parsing until we run out of chunks, or have a parse error
+            while let Ok(httparse::Status::Complete((stopped, chunksize))) =
+                httparse::parse_chunk_size(remaining)
+            {
+                let end = chunksize as usize + stopped;
+                body.extend(&remaining[stopped..chunksize as usize + stopped]);
+                remaining = &remaining[end..];
+            }
+
+            body
+        }
+
+        httparse::Status::Partial => {
+            panic!("Entire request should have been read already but wasn't")
+        }
+    };
+
+    Ok(body)
+}
+
+impl PendingRequest {
+    pub fn wait(self) -> Result<Response, httparse::Error> {
+        use futures::Future;
+        let raw = self.receiver.wait().unwrap();
+        let body = parse_body_from(&raw)?;
+        Ok(Response { raw, body })
+    }
+}
+
+pub struct Response {
+    raw: Vec<u8>,
+    body: Vec<u8>,
+}
+
+impl Response {
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    pub fn headers(&self) -> Vec<httparse::Header> {
+        let mut headers = vec![httparse::EMPTY_HEADER; 256];
+        let mut req = httparse::Response::new(&mut headers);
+        while let Err(httparse::Error::TooManyHeaders) = req.parse(&self.raw) {
+            headers.extend_from_slice(&[httparse::EMPTY_HEADER; 256]);
+            req = httparse::Response::new(&mut headers);
+        }
+
+        headers
     }
 }
