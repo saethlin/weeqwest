@@ -1,49 +1,117 @@
 use futures::sync::oneshot;
 use mio::net::TcpStream;
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::ToSocketAddrs;
 use std::sync::mpsc;
 
 mod error;
 mod tls;
+//mod url;
 pub use crate::error::Error;
 use crate::tls::TlsClient;
+//pub use crate::url::Url;
 
 const NEW_CLIENT: mio::Token = mio::Token(0);
 
+/// Send an HTTP GET request
+///
+/// ```rust
+/// let response = tiny_reqwest::get("api.slack.com", "/api/api.test?foo=bar").unwrap();
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
+/// ```
 pub fn get(hostname: &str, path: &str) -> Result<Response, Error> {
+    use std::io::Read;
     let addr = (hostname, 443)
         .to_socket_addrs()
         .map(|mut addrs| addrs.next())?
         .ok_or(Error::IpLookupFailed)?;
 
-    let sock = TcpStream::connect(&addr)?;
     let dns_name =
         webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
-    let mut tlsclient = TlsClient::new(sock, dns_name);
+    let mut sock = std::net::TcpStream::connect(&addr)?;
+    let mut sess = rustls::ClientSession::new(&tls::CONFIG, dns_name);
+    let mut tls = rustls::Stream::new(&mut sess, &mut sock);
+
     write!(
-        tlsclient,
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: \
-         close\r\nAccept-Encoding: identity\r\n\r\n",
+        tls,
+        "GET {} HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Connection: close\r\n\
+         Accept-Encoding: identity\r\n\r\n",
         path, hostname
     )?;
 
-    let mut poll = mio::Poll::new()?;
-    let mut events = mio::Events::with_capacity(4);
-    tlsclient.register(&mut poll)?;
-    loop {
-        poll.poll(&mut events, None)?;
-        for ev in events.iter() {
-            tlsclient.ready(&mut poll, &ev)?;
-        }
-        if tlsclient.is_closed() {
-            break;
+    let mut raw = Vec::new();
+    if let Err(e) = tls.read_to_end(&mut raw) {
+        use std::error::Error;
+        if e.description() != "CloseNotify alert received" {
+            return Err(e.into());
         }
     }
 
-    let raw = tlsclient.take_bytes();
-    let body = parse_body_from(&raw)?;
-    Ok(Response { raw, body })
+    Ok(Response::parse(raw)?)
+}
+
+pub struct Session {
+    hostname: String,
+    tlsclient: tls::TlsClient,
+    poll: mio::Poll,
+    events: mio::Events,
+}
+
+impl Session {
+    pub fn new(hostname: &str) -> Result<Self, Error> {
+        let addr = (hostname, 443)
+            .to_socket_addrs()
+            .map(|mut addrs| addrs.next())?
+            .ok_or(Error::IpLookupFailed)?;
+
+        let dns_name =
+            webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
+        let socket = TcpStream::connect(&addr)?;
+        let tlsclient = TlsClient::new(socket, dns_name);
+
+        let mut poll = mio::Poll::new()?;
+        tlsclient.register(&mut poll)?;
+
+        Ok(Self {
+            hostname: hostname.to_string(),
+            tlsclient,
+            poll,
+            events: mio::Events::with_capacity(4),
+        })
+    }
+
+    pub fn get(&mut self, path: &str) -> Result<Response, Error> {
+        write!(
+            self.tlsclient,
+            "GET {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Connection: keep-alive\r\n\
+             Accept-Encoding: identity\r\n\r\n",
+            path, self.hostname
+        )?;
+
+        // TODO: Why do we need to reregister here? I did not expect that
+        self.tlsclient.reregister(&mut self.poll)?;
+
+        loop {
+            self.poll.poll(&mut self.events, None)?;
+            for ev in self.events.iter() {
+                self.tlsclient.ready(&mut self.poll, &ev)?;
+            }
+            if self.tlsclient.is_closed() {
+                break;
+            }
+            if self.tlsclient.response_done() {
+                break;
+            }
+        }
+
+        let raw = self.tlsclient.take_bytes();
+        Ok(Response::parse(raw)?)
+    }
 }
 
 /// A `Client` to make HTTP requests with.
@@ -54,23 +122,28 @@ pub fn get(hostname: &str, path: &str) -> Result<Response, Error> {
 /// current thread.
 ///
 /// ```rust
-/// let client = tiny_reqwest::Client::new().unwrap();
+/// let client = tiny_reqwest::Client::new();
 /// let handle = client.get("api.slack.com", "/api/api.test?foo=bar").unwrap();
 /// // Some time later
-/// let body = handle.wait().body().unwrap();
-/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", body.as_slice());
+/// let response = handle.wait().unwrap();
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
 /// ```
 pub struct Client {
     sender: mpsc::Sender<(TlsClient, oneshot::Sender<Vec<u8>>)>,
     readiness: mio::SetReadiness,
+    addrs: HashMap<String, std::net::SocketAddr>,
 }
 
 impl Client {
-    pub fn get(&self, hostname: &str, path: &str) -> Result<PendingRequest, Error> {
-        let addr = (hostname, 443)
-            .to_socket_addrs()
-            .map(|mut addrs| addrs.next())?
-            .ok_or(Error::IpLookupFailed)?;
+    pub fn get(&mut self, hostname: &str, path: &str) -> Result<PendingRequest, Error> {
+        let addr = self.addrs.entry(hostname.to_string()).or_insert_with(|| {
+            (hostname, 443)
+                .to_socket_addrs()
+                .map(|mut addrs| addrs.next())
+                .unwrap()
+                .ok_or(Error::IpLookupFailed)
+                .unwrap()
+        }); // TODO: Remove the unwraps
 
         let sock = TcpStream::connect(&addr)?;
         let dns_name =
@@ -79,8 +152,10 @@ impl Client {
 
         write!(
             tlsclient,
-            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: \
-             close\r\nAccept-Encoding: identity\r\n\r\n",
+            "GET {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Connection: close\r\n\
+             Accept-Encoding: identity\r\n\r\n",
             path, hostname
         )?;
 
@@ -142,7 +217,7 @@ impl Client {
                 let mut i = 0;
                 while i != clients.len() {
                     if clients[i].0.is_closed() {
-                        let (client, output_channel) = clients.remove(i);
+                        let (mut client, output_channel) = clients.remove(i);
                         output_channel.send(client.take_bytes()).unwrap();
                     } else {
                         i += 1;
@@ -151,7 +226,11 @@ impl Client {
             }
         });
 
-        Self { sender, readiness }
+        Self {
+            sender,
+            readiness,
+            addrs: HashMap::new(),
+        }
     }
 }
 
@@ -159,58 +238,29 @@ pub struct PendingRequest {
     receiver: oneshot::Receiver<Vec<u8>>,
 }
 
-fn parse_body_from(raw: &[u8]) -> Result<Vec<u8>, httparse::Error> {
-    // Reserve enough space to hold all the incoming bytes so no reallocation occurs
-    let mut body = Vec::with_capacity(raw.len());
-
-    // Read the headers, increasing storage if needed
-    let mut headers = vec![httparse::EMPTY_HEADER; 256];
-    let mut req = httparse::Response::new(&mut headers);
-    while let Err(httparse::Error::TooManyHeaders) = req.parse(&raw) {
-        headers.extend_from_slice(&[httparse::EMPTY_HEADER; 256]);
-        req = httparse::Response::new(&mut headers);
-    }
-
-    // Initial parse fills out the request struct and jumps to the beginning of the chunks
-    let body = match req.parse(&raw)? {
-        httparse::Status::Complete(len) => {
-            let mut remaining = &raw[len..];
-
-            // Keep parsing until we run out of chunks, or have a parse error
-            while let Ok(httparse::Status::Complete((stopped, chunksize))) =
-                httparse::parse_chunk_size(remaining)
-            {
-                let end = chunksize as usize + stopped;
-                body.extend(&remaining[stopped..chunksize as usize + stopped]);
-                remaining = &remaining[end..];
-            }
-
-            body
-        }
-
-        httparse::Status::Partial => {
-            panic!("Entire request should have been read already but wasn't")
-        }
-    };
-
-    Ok(body)
-}
-
 impl PendingRequest {
     pub fn wait(self) -> Result<Response, httparse::Error> {
         use futures::Future;
         let raw = self.receiver.wait().unwrap();
-        let body = parse_body_from(&raw)?;
-        Ok(Response { raw, body })
+        Response::parse(raw)
     }
 }
 
 pub struct Response {
     raw: Vec<u8>,
     body: Vec<u8>,
+    status: u16,
 }
 
 impl Response {
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    pub fn is_success(&self) -> bool {
+        300 > self.status && self.status >= 200
+    }
+
     pub fn body(&self) -> &[u8] {
         &self.body
     }
@@ -219,10 +269,48 @@ impl Response {
         let mut headers = vec![httparse::EMPTY_HEADER; 256];
         let mut req = httparse::Response::new(&mut headers);
         while let Err(httparse::Error::TooManyHeaders) = req.parse(&self.raw) {
-            headers.extend_from_slice(&[httparse::EMPTY_HEADER; 256]);
+            headers = vec![httparse::EMPTY_HEADER; headers.len() + 256];
             req = httparse::Response::new(&mut headers);
         }
 
         headers
+    }
+
+    fn parse(raw: Vec<u8>) -> Result<Self, httparse::Error> {
+        // Read the headers, increasing storage if needed
+        let mut headers = vec![httparse::EMPTY_HEADER; 256];
+        let mut req = httparse::Response::new(&mut headers);
+        while let Err(httparse::Error::TooManyHeaders) = req.parse(&raw) {
+            headers = vec![httparse::EMPTY_HEADER; headers.len() + 256];
+            req = httparse::Response::new(&mut headers);
+        }
+
+        // Initial parse fills out the request struct and jumps to the beginning of the chunks
+        let body = match req.parse(&raw)? {
+            httparse::Status::Complete(len) => {
+                let mut remaining = &raw[len..];
+                // Reserve enough space to hold all the incoming bytes so no reallocation occurs
+                let mut body = Vec::with_capacity(remaining.len());
+
+                // Keep parsing until we run out of chunks, or have a parse error
+                while let Ok(httparse::Status::Complete((stopped, chunksize))) =
+                    httparse::parse_chunk_size(remaining)
+                {
+                    let end = chunksize as usize + stopped;
+                    body.extend(&remaining[stopped..chunksize as usize + stopped]);
+                    remaining = &remaining[end..];
+                }
+
+                body
+            }
+
+            httparse::Status::Partial => {
+                panic!("Entire request should have been read already but wasn't")
+            }
+        };
+
+        let status = req.code.unwrap();
+
+        Ok(Response { raw, body, status })
     }
 }

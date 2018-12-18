@@ -23,7 +23,7 @@ pub struct TlsClient {
     closing: bool,
     clean_closure: bool,
     tls_session: rustls::ClientSession,
-    buf: Vec<u8>,
+    pub buf: Vec<u8>,
     pub token: mio::Token,
 }
 
@@ -49,6 +49,7 @@ impl TlsClient {
             token: mio::Token(0), // invalid value
         }
     }
+
     pub fn ready(&mut self, poll: &mut mio::Poll, ev: &Event) -> Result<(), Error> {
         if ev.readiness().is_readable() {
             self.do_read()?;
@@ -155,7 +156,26 @@ impl TlsClient {
         self.closing
     }
 
-    pub fn take_bytes(self) -> Vec<u8> {
-        self.buf
+    pub fn take_bytes(&mut self) -> Vec<u8> {
+        std::mem::replace(&mut self.buf, Vec::new())
+    }
+
+    pub fn response_done(&self) -> bool {
+        // This happens a lot at the beginning of a connection
+        if self.buf.len() == 0 {
+            return false;
+        }
+
+        self.buf.ends_with(b"\r\n0\r\n\r\n")
+    }
+}
+
+impl Drop for TlsClient {
+    fn drop(&mut self) {
+        use std::io::Write;
+        if !self.closing {
+            self.tls_session.send_close_notify();
+            let _ = self.flush();
+        }
     }
 }
