@@ -9,6 +9,7 @@ mod tls;
 pub use crate::client::Client;
 pub use crate::error::Error;
 pub use crate::session::Session;
+pub use http::Request;
 
 pub fn send(req: &http::Request<()>) -> Result<http::Response<Vec<u8>>, Error> {
     use std::io::Read;
@@ -61,40 +62,11 @@ pub fn send(req: &http::Request<()>) -> Result<http::Response<Vec<u8>>, Error> {
 /// Send an HTTP GET request
 ///
 /// ```rust
-/// let response = tiny_reqwest::get("api.slack.com", "/api/api.test?foo=bar").unwrap();
+/// let response = tiny_reqwest::get("https://api.slack.com/api/api.test?foo=bar").unwrap();
 /// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
 /// ```
-pub fn get(hostname: &str, path: &str) -> Result<http::Response<Vec<u8>>, Error> {
-    use std::io::Read;
-    let addr = (hostname, 443)
-        .to_socket_addrs()
-        .map(|mut addrs| addrs.next())?
-        .ok_or(Error::IpLookupFailed)?;
-
-    let dns_name =
-        webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
-    let mut sock = std::net::TcpStream::connect(&addr)?;
-    let mut sess = rustls::ClientSession::new(&tls::CONFIG, dns_name);
-    let mut tls = rustls::Stream::new(&mut sess, &mut sock);
-
-    write!(
-        tls,
-        "GET {} HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Connection: close\r\n\
-         Accept-Encoding: identity\r\n\r\n",
-        path, hostname
-    )?;
-
-    let mut raw = Vec::new();
-    if let Err(e) = tls.read_to_end(&mut raw) {
-        use std::error::Error;
-        if e.description() != "CloseNotify alert received" {
-            return Err(e.into());
-        }
-    }
-
-    Ok(parse_response(raw)?)
+pub fn get(url: &str) -> Result<http::Response<Vec<u8>>, Error> {
+    send(&http::Request::get(url).body(())?)
 }
 
 fn parse_response(raw: Vec<u8>) -> Result<http::Response<Vec<u8>>, Error> {
