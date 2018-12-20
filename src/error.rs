@@ -5,8 +5,10 @@ pub enum Error {
     Io(io::Error),
     Tls(rustls::TLSError),
     Parse(httparse::Error),
+    Http(http::Error),
     InvalidHostname,
     IpLookupFailed,
+    InvalidUrl,
 }
 
 impl From<io::Error> for Error {
@@ -24,5 +26,11 @@ impl From<rustls::TLSError> for Error {
 impl From<httparse::Error> for Error {
     fn from(e: httparse::Error) -> Error {
         Error::Parse(e)
+    }
+}
+
+impl From<http::Error> for Error {
+    fn from(e: http::Error) -> Error {
+        Error::Http(e)
     }
 }
