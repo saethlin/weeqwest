@@ -1,6 +1,7 @@
 use crate::parse_response;
 use crate::tls::TlsClient;
 use crate::Error;
+use crate::Response;
 use mio::net::TcpStream;
 use std::io::Write;
 use std::net::ToSocketAddrs;
@@ -35,7 +36,7 @@ impl Session {
         })
     }
 
-    pub fn get(&mut self, path: &str) -> Result<http::Response<Vec<u8>>, Error> {
+    pub fn get(&mut self, path: &str) -> Result<Response, Error> {
         write!(
             self.tlsclient,
             "GET {} HTTP/1.1\r\n\
@@ -62,6 +63,6 @@ impl Session {
         }
 
         let raw = self.tlsclient.take_bytes();
-        Ok(parse_response(raw)?)
+        parse_response(&raw)
     }
 }

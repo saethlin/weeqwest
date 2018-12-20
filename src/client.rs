@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::parse_response;
+use crate::Response;
 use futures::sync::oneshot;
 use mio::net::TcpStream;
 use std::collections::HashMap;
@@ -19,41 +20,55 @@ const NEW_CLIENT: mio::Token = mio::Token(0);
 /// current thread.
 ///
 /// ```rust
-/// let client = tiny_reqwest::Client::new();
-/// let handle = client.get("api.slack.com", "/api/api.test?foo=bar").unwrap();
+/// let mut client = weeqwest::Client::new();
+/// let handle = client.get("https://api.slack.com/api/api.test?foo=bar").unwrap();
 /// // Some time later
 /// let response = handle.wait().unwrap();
-/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
+/// assert_eq!("{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.text().unwrap());
 /// ```
 pub struct Client {
     sender: mpsc::Sender<(TlsClient, oneshot::Sender<Vec<u8>>)>,
     readiness: mio::SetReadiness,
-    addrs: HashMap<String, std::net::SocketAddr>,
+    addrs: HashMap<(String, u16), std::net::SocketAddr>,
 }
 
 impl Client {
-    pub fn get(&mut self, hostname: &str, path: &str) -> Result<PendingRequest, Error> {
-        let addr = self.addrs.entry(hostname.to_string()).or_insert_with(|| {
-            (hostname, 443)
-                .to_socket_addrs()
-                .map(|mut addrs| addrs.next())
-                .unwrap()
-                .ok_or(Error::IpLookupFailed)
-                .unwrap()
-        }); // TODO: Remove the unwraps
+    pub fn send(&mut self, req: &http::Request<()>) -> Result<PendingRequest, Error> {
+        assert!(
+            req.version() == http::Version::HTTP_11,
+            "only supports HTTP/1.1"
+        );
 
-        let sock = TcpStream::connect(&addr)?;
+        let host = req.uri().host().ok_or(Error::InvalidUrl)?;
+        let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
+        let path = req
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/");
+
+        let addr = match self.addrs.get(&(host.to_string(), port)) {
+            Some(a) => *a,
+            None => (host, port)
+                .to_socket_addrs()
+                .map(|mut addrs| addrs.next())?
+                .ok_or(Error::IpLookupFailed)?,
+        };
+
         let dns_name =
-            webpki::DNSNameRef::try_from_ascii_str(hostname).map_err(|_| Error::InvalidHostname)?;
+            webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
+        let sock = TcpStream::connect(&addr)?;
         let mut tlsclient = TlsClient::new(sock, dns_name);
 
         write!(
             tlsclient,
-            "GET {} HTTP/1.1\r\n\
+            "{} {} HTTP/1.1\r\n\
              Host: {}\r\n\
              Connection: close\r\n\
              Accept-Encoding: identity\r\n\r\n",
-            path, hostname
+            req.method().as_str(),
+            path,
+            host
         )?;
 
         let (sender, receiver) = oneshot::channel();
@@ -62,6 +77,10 @@ impl Client {
         self.readiness.set_readiness(mio::Ready::readable())?;
 
         Ok(PendingRequest { receiver })
+    }
+
+    pub fn get(&mut self, url: &str) -> Result<PendingRequest, Error> {
+        self.send(&http::Request::get(url).body(())?)
     }
 
     pub fn new() -> Self {
@@ -136,9 +155,9 @@ pub struct PendingRequest {
 }
 
 impl PendingRequest {
-    pub fn wait(self) -> Result<http::Response<Vec<u8>>, Error> {
+    pub fn wait(self) -> Result<Response, Error> {
         use futures::Future;
         let raw = self.receiver.wait().unwrap();
-        parse_response(raw)
+        parse_response(&raw)
     }
 }

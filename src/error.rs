@@ -6,6 +6,7 @@ pub enum Error {
     Tls(rustls::TLSError),
     Parse(httparse::Error),
     Http(http::Error),
+    Decode(std::str::Utf8Error),
     InvalidHostname,
     IpLookupFailed,
     InvalidUrl,
@@ -32,5 +33,11 @@ impl From<httparse::Error> for Error {
 impl From<http::Error> for Error {
     fn from(e: http::Error) -> Error {
         Error::Http(e)
+    }
+}
+
+impl From<std::str::Utf8Error> for Error {
+    fn from(e: std::str::Utf8Error) -> Error {
+        Error::Decode(e)
     }
 }

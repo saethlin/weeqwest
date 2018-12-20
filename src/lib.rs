@@ -1,3 +1,21 @@
+//! # weeqwest
+//!
+//! The `weeqwest` crate is an 80% solution for making HTTP requests. It provides a minimal set of
+//! features that can be implemented with high performance and a small dependency tree.
+//!
+//! If you just need to make a single GET request at a url:
+//! ```rust
+//! # fn run() -> Result<(), weeqwest::Error> {
+//! let response = weeqwest::get("https://www.rust-lang.org")?;
+//! println!("body = {:?}", response.text()?);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! This crate also provides a `Client` for doing asynchronous requests, and a `Session` which uses
+//! HTTP keep-alive to make consecutive requests to the same domain much faster, though not in
+//! parallel.
+
 use std::io::Write;
 use std::net::ToSocketAddrs;
 
@@ -11,7 +29,7 @@ pub use crate::error::Error;
 pub use crate::session::Session;
 pub use http::Request;
 
-pub fn send(req: &http::Request<()>) -> Result<http::Response<Vec<u8>>, Error> {
+pub fn send(req: &http::Request<()>) -> Result<Response, Error> {
     use std::io::Read;
     assert!(
         req.version() == http::Version::HTTP_11,
@@ -56,20 +74,20 @@ pub fn send(req: &http::Request<()>) -> Result<http::Response<Vec<u8>>, Error> {
         }
     }
 
-    Ok(parse_response(raw)?)
+    parse_response(&raw)
 }
 
 /// Send an HTTP GET request
 ///
 /// ```rust
-/// let response = tiny_reqwest::get("https://api.slack.com/api/api.test?foo=bar").unwrap();
-/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
+/// let response = weeqwest::get("https://api.slack.com/api/api.test?foo=bar").unwrap();
+/// assert_eq!("{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.text().unwrap());
 /// ```
-pub fn get(url: &str) -> Result<http::Response<Vec<u8>>, Error> {
+pub fn get(url: &str) -> Result<Response, Error> {
     send(&http::Request::get(url).body(())?)
 }
 
-fn parse_response(raw: Vec<u8>) -> Result<http::Response<Vec<u8>>, Error> {
+fn parse_response(raw: &[u8]) -> Result<Response, Error> {
     // Read the headers, increasing storage if needed
     let mut headers = vec![httparse::EMPTY_HEADER; 256];
     let mut response = httparse::Response::new(&mut headers);
@@ -97,9 +115,9 @@ fn parse_response(raw: Vec<u8>) -> Result<http::Response<Vec<u8>>, Error> {
             body
         }
 
-        httparse::Status::Partial => {
-            panic!("Entire response should have been read already but wasn't")
-        }
+        httparse::Status::Partial => panic!(
+            "Entire response should have been read already but wasn't. This failure indicates a bug in this library."
+        ),
     };
 
     let status = response.code.unwrap();
@@ -107,7 +125,7 @@ fn parse_response(raw: Vec<u8>) -> Result<http::Response<Vec<u8>>, Error> {
     let version = match response.version {
         Some(0) => http::Version::HTTP_10,
         Some(1) => http::Version::HTTP_11,
-        _ => unreachable!(),
+        _ => unimplemented!("This library does not support HTTP/2 responses"),
     };
 
     let mut builder = http::response::Builder::new();
@@ -118,5 +136,23 @@ fn parse_response(raw: Vec<u8>) -> Result<http::Response<Vec<u8>>, Error> {
         builder.header(h.name, h.value);
     }
 
-    Ok(builder.body(body)?)
+    Ok(Response::new(builder.body(body)?))
+}
+
+pub struct Response {
+    inner: http::Response<Vec<u8>>,
+}
+
+impl Response {
+    fn new(inner: http::Response<Vec<u8>>) -> Self {
+        Self { inner }
+    }
+
+    pub fn text(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(self.inner.body())
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.inner.body()
+    }
 }
