@@ -23,7 +23,7 @@ const NEW_CLIENT: mio::Token = mio::Token(0);
 /// assert_eq!("{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.text().unwrap());
 /// ```
 pub struct Client {
-    sender: mpsc::Sender<(TlsClient, oneshot::Sender<Vec<u8>>)>,
+    sender: mpsc::SyncSender<(TlsClient, oneshot::Sender<Vec<u8>>)>,
     readiness: mio::SetReadiness,
     addrs: HashMap<(String, u16), std::net::SocketAddr>,
 }
@@ -65,7 +65,7 @@ impl Client {
 
     pub fn new() -> Self {
         let (registration, readiness) = mio::Registration::new2();
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
 
         std::thread::spawn(move || {
             let mut clients: Vec<(TlsClient, oneshot::Sender<Vec<u8>>)> = Vec::new();

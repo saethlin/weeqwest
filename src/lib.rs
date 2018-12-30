@@ -295,4 +295,8 @@ impl Response {
     pub fn bytes(&self) -> &[u8] {
         &self.inner.body()
     }
+
+    pub fn status(&self) -> http::StatusCode {
+        self.inner.status()
+    }
 }
