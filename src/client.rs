@@ -1,18 +1,14 @@
-use crate::error::Error;
-use crate::parse_response;
-use crate::Response;
+use crate::tls::TlsClient;
+use crate::{parse_response, Error, Request, Response};
 use futures::sync::oneshot;
 use mio::net::TcpStream;
 use std::collections::HashMap;
-use std::io::Write;
 use std::net::ToSocketAddrs;
 use std::sync::mpsc;
 
-use crate::tls::TlsClient;
-
 const NEW_CLIENT: mio::Token = mio::Token(0);
 
-/// A `Client` to make HTTP requests with.
+/// A `Client` to make concurrent HTTP requests with.
 ///
 /// A `Client` is a handle to a background thread that manages a mio Poll, and can be used to
 /// make multiple requests asynchronously. If you only need to make one request or don't need
@@ -33,19 +29,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn send(&mut self, req: &http::Request<()>) -> Result<PendingRequest, Error> {
-        assert!(
-            req.version() == http::Version::HTTP_11,
-            "only supports HTTP/1.1"
-        );
-
+    pub fn send(&mut self, req: &Request) -> Result<PendingRequest, Error> {
         let host = req.uri().host().ok_or(Error::InvalidUrl)?;
         let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
-        let path = req
-            .uri()
-            .path_and_query()
-            .map(|p| p.as_str())
-            .unwrap_or("/");
 
         let addr = match self.addrs.get(&(host.to_string(), port)) {
             Some(a) => *a,
@@ -60,19 +46,13 @@ impl Client {
         let sock = TcpStream::connect(&addr)?;
         let mut tlsclient = TlsClient::new(sock, dns_name);
 
-        write!(
-            tlsclient,
-            "{} {} HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Connection: close\r\n\
-             Accept-Encoding: identity\r\n\r\n",
-            req.method().as_str(),
-            path,
-            host
-        )?;
+        req.write_to(&mut tlsclient)?;
 
         let (sender, receiver) = oneshot::channel();
 
+        // TODO: If the background thread panics, the receiver will have hung up, which will cause
+        // this call to return Err. Unclear if this is something we should try to notify the user
+        // about more gracefully
         self.sender.send((tlsclient, sender)).unwrap();
         self.readiness.set_readiness(mio::Ready::readable())?;
 
@@ -80,7 +60,7 @@ impl Client {
     }
 
     pub fn get(&mut self, url: &str) -> Result<PendingRequest, Error> {
-        self.send(&http::Request::get(url).body(())?)
+        self.send(&Request::get(url)?)
     }
 
     pub fn new() -> Self {
@@ -134,7 +114,10 @@ impl Client {
                 while i != clients.len() {
                     if clients[i].0.is_closed() {
                         let (mut client, output_channel) = clients.remove(i);
-                        output_channel.send(client.take_bytes()).unwrap();
+                        // TODO: If a user has dropped the receiver, this returns an error
+                        // If they're doing that, they should probably get a helpful log!, since
+                        // it's possible they don't care about the result of a side-effecty request
+                        let _ = output_channel.send(client.take_bytes());
                     } else {
                         i += 1;
                     }

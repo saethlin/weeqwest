@@ -1,9 +1,6 @@
-use crate::parse_response;
 use crate::tls::TlsClient;
-use crate::Error;
-use crate::Response;
+use crate::{parse_response, Error, Request, Response};
 use mio::net::TcpStream;
-use std::io::Write;
 use std::net::ToSocketAddrs;
 
 pub struct Session {
@@ -37,14 +34,8 @@ impl Session {
     }
 
     pub fn get(&mut self, path: &str) -> Result<Response, Error> {
-        write!(
-            self.tlsclient,
-            "GET {} HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Connection: keep-alive\r\n\
-             Accept-Encoding: identity\r\n\r\n",
-            path, self.hostname
-        )?;
+        let url = format!("{}/{}", self.hostname, path);
+        Request::get(&url)?.write_to(&mut self.tlsclient)?;
 
         // TODO: Why do we need to reregister here? I did not expect that
         self.tlsclient.reregister(&mut self.poll)?;

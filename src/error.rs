@@ -41,3 +41,9 @@ impl From<std::str::Utf8Error> for Error {
         Error::Decode(e)
     }
 }
+
+impl From<http::uri::InvalidUri> for Error {
+    fn from(_: http::uri::InvalidUri) -> Error {
+        Error::InvalidUrl
+    }
+}

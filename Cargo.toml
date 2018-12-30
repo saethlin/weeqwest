@@ -11,5 +11,11 @@ webpki = "0.18"
 webpki-roots = "0.15"
 httparse = "1.0"
 lazy_static = "1.0"
-futures = "0.1"
 http = "0.1"
+
+# Used for generating multipart boundaries
+rand_hc = "0.1"
+rand_core = "0.3"
+
+# Only used for client's channel
+futures = "0.1"

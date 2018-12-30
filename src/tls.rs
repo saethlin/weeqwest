@@ -23,7 +23,7 @@ pub struct TlsClient {
     closing: bool,
     clean_closure: bool,
     tls_session: rustls::ClientSession,
-    pub buf: Vec<u8>,
+    buf: Vec<u8>,
     pub token: mio::Token,
 }
 
@@ -162,7 +162,7 @@ impl TlsClient {
 
     pub fn response_done(&self) -> bool {
         // This happens a lot at the beginning of a connection
-        if self.buf.len() == 0 {
+        if self.buf.is_empty() {
             return false;
         }
 

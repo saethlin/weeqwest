@@ -1,20 +1,30 @@
 //! # weeqwest
 //!
-//! The `weeqwest` crate is an 80% solution for making HTTP requests. It provides a minimal set of
+//! This crate is an 80% solution for making HTTP requests. It provides a minimal set of
 //! features that can be implemented with high performance and a small dependency tree.
+//! Wheras `reqwest` provides a super-powered `Client` that does all the things, `weeqwest`
+//! provides more ways to send requests, so you can do the fastest thing for your workload.
 //!
-//! If you just need to make a single GET request at a url:
+//! If you just need to make a single GET
 //! ```rust
 //! # fn run() -> Result<(), weeqwest::Error> {
 //! let response = weeqwest::get("https://www.rust-lang.org")?;
-//! println!("body = {:?}", response.text()?);
+//! println!("body = {:?}", response.text()?); // Response body may not be UTF-8
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! This crate also provides a `Client` for doing asynchronous requests, and a `Session` which uses
+//! Unlike `reqwest`, the free functions are faster than constructing and using a [`Client`][Client].
+//!
+//! This crate also provides a [`Client`][Client] for doing asynchronous requests, and a `Session` which uses
 //! HTTP keep-alive to make consecutive requests to the same domain much faster, though not in
 //! parallel.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+lazy_static::lazy_static! {
+    pub static ref ADDRS: Arc<Mutex<HashMap<(String, u16), std::net::SocketAddr>>> = Arc::new(Mutex::new(HashMap::new()));
+}
 
 use std::io::Write;
 use std::net::ToSocketAddrs;
@@ -27,27 +37,161 @@ mod tls;
 pub use crate::client::Client;
 pub use crate::error::Error;
 pub use crate::session::Session;
-pub use http::Request;
 
-pub fn send(req: &http::Request<()>) -> Result<Response, Error> {
+pub struct Request {
+    uri: http::Uri,
+    method: http::Method,
+    headers: http::HeaderMap,
+    body: Vec<u8>,
+}
+
+impl Request {
+    pub fn get(uri: &str) -> Result<Self, Error> {
+        Ok(Self {
+            uri: http::HttpTryFrom::try_from(uri)?,
+            method: http::Method::GET,
+            headers: http::HeaderMap::new(),
+            body: Vec::new(),
+        })
+    }
+
+    pub fn post(uri: &str) -> Result<Self, Error> {
+        Ok(Self {
+            uri: http::HttpTryFrom::try_from(uri)?,
+            method: http::Method::POST,
+            headers: http::HeaderMap::new(),
+            body: Vec::new(),
+        })
+    }
+
+    pub fn form(mut self, form: &[(&str, &[u8])]) -> Self {
+        use rand_core::{RngCore, SeedableRng};
+        let mut boundary = [0u8; 70];
+        let mut rng = ::rand_hc::Hc128Rng::seed_from_u64(0);
+        // Cross our fingers and hope we don't have a collision
+        // TODO: Use more range in here. Possibly all of it?
+        rng.fill_bytes(&mut boundary);
+        for b in boundary.iter_mut() {
+            *b = (*b % 26) + 97;
+        }
+        let boundary = std::str::from_utf8(&boundary).unwrap();
+
+        // Write the contents of form into self.body
+        self.body.clear();
+
+        for (name, item) in form {
+            write!(
+                self.body,
+                "\r\n--{}\r\nContent-Disposition: form-data; name={:?}\r\n\r\n",
+                boundary, name
+            )
+            .unwrap();
+            self.body.extend_from_slice(&item);
+            self.body.extend_from_slice(b"\r\n");
+        }
+        write!(self.body, "--{}--", boundary).unwrap();
+
+        self.headers.insert(
+            "Content-Length",
+            http::header::HeaderValue::from_str(&self.body.len().to_string()).unwrap(),
+        );
+
+        let content_type = format!("multipart/form-data; boundary={}", boundary);
+        self.headers.insert(
+            "Content-Type",
+            http::header::HeaderValue::from_str(&content_type).unwrap(),
+        );
+
+        self
+    }
+
+    pub fn text(mut self, text: String) -> Self {
+        self.headers.insert(
+            "Content-Length",
+            http::header::HeaderValue::from_str(&text.len().to_string()).unwrap(),
+        );
+        self.headers.insert(
+            "Content-Type",
+            http::header::HeaderValue::from_static("text"),
+        );
+        self.body = text.into_bytes();
+        self
+    }
+
+    pub fn uri(&self) -> &http::Uri {
+        &self.uri
+    }
+
+    pub fn method(&self) -> &http::Method {
+        &self.method
+    }
+
+    pub fn headers(&self) -> &http::HeaderMap {
+        &self.headers
+    }
+
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    fn write_to(&self, tls: &mut std::io::Write) -> Result<(), Error> {
+        let host = self.uri().host().ok_or(Error::InvalidUrl)?;
+        let path = self
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/");
+
+        // Write the HTTP header
+        write!(
+            tls,
+            "{} {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Connection: close\r\n\
+             Accept-Encoding: identity\r\n",
+            self.method().as_str(),
+            path,
+            host
+        )?;
+
+        for (key, value) in self.headers() {
+            write!(tls, "{}: ", key)?;
+            tls.write_all(value.as_bytes())?;
+            tls.write_all(b"\r\n")?;
+        }
+
+        tls.write_all(b"\r\n")?;
+
+        // Write the HTTP body
+        tls.write_all(self.body())?;
+
+        Ok(())
+    }
+}
+
+pub fn send(req: &Request) -> Result<Response, Error> {
     use std::io::Read;
-    assert!(
-        req.version() == http::Version::HTTP_11,
-        "only supports HTTP/1.1"
-    );
 
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
     let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
 
-    let addr = (host, port)
-        .to_socket_addrs()
-        .map(|mut addrs| addrs.next())?
-        .ok_or(Error::IpLookupFailed)?;
+    // Use the global DNS cache if possible
+    // TODO: There should be some sort of expiration on this, but I don't know how to get that
+    // information from the system DNS resolver
+    let addr = {
+        let mut map = ADDRS.lock().unwrap();
+        match map.get(&(host.to_string(), port)) {
+            Some(a) => *a,
+            None => {
+                let addr = (host, port)
+                    .to_socket_addrs()
+                    .map(|mut addrs| addrs.next())?
+                    .ok_or(Error::IpLookupFailed)?;
+                map.insert((host.to_string(), port), addr);
+                addr
+            }
+        }
+    };
 
     let dns_name =
         webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
@@ -55,16 +199,8 @@ pub fn send(req: &http::Request<()>) -> Result<Response, Error> {
     let mut sess = rustls::ClientSession::new(&tls::CONFIG, dns_name);
     let mut tls = rustls::Stream::new(&mut sess, &mut sock);
 
-    write!(
-        tls,
-        "{} {} HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Connection: close\r\n\
-         Accept-Encoding: identity\r\n\r\n",
-        req.method().as_str(),
-        path,
-        host
-    )?;
+    // Send the request
+    req.write_to(&mut tls)?;
 
     let mut raw = Vec::new();
     if let Err(e) = tls.read_to_end(&mut raw) {
@@ -84,7 +220,11 @@ pub fn send(req: &http::Request<()>) -> Result<Response, Error> {
 /// assert_eq!("{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.text().unwrap());
 /// ```
 pub fn get(url: &str) -> Result<Response, Error> {
-    send(&http::Request::get(url).body(())?)
+    send(&Request::get(url)?)
+}
+
+pub fn post(url: &str) -> Result<Response, Error> {
+    send(&Request::post(url)?)
 }
 
 fn parse_response(raw: &[u8]) -> Result<Response, Error> {
