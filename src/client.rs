@@ -35,10 +35,14 @@ impl Client {
 
         let addr = match self.addrs.get(&(host.to_string(), port)) {
             Some(a) => *a,
-            None => (host, port)
-                .to_socket_addrs()
-                .map(|mut addrs| addrs.next())?
-                .ok_or(Error::IpLookupFailed)?,
+            None => {
+                let addr = (host, port)
+                    .to_socket_addrs()
+                    .map(|mut addrs| addrs.next())?
+                    .ok_or(Error::IpLookupFailed)?;
+                self.addrs.insert((host.to_string(), port), addr);
+                addr
+            }
         };
 
         let dns_name =
