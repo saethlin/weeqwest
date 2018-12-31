@@ -20,16 +20,16 @@
 //! HTTP keep-alive to make consecutive requests to the same domain much faster, though not in
 //! parallel.
 
-use std::collections::HashMap;
+use crate::dns::DnsCache;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
+
 lazy_static::lazy_static! {
-    pub static ref ADDRS: Arc<Mutex<HashMap<(String, u16), std::net::SocketAddr>>> = Arc::new(Mutex::new(HashMap::new()));
+    pub static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
 }
 
-use std::io::Write;
-use std::net::ToSocketAddrs;
-
 mod client;
+mod dns;
 mod error;
 mod session;
 mod tls;
@@ -175,23 +175,7 @@ pub fn send(req: &Request) -> Result<Response, Error> {
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
     let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
 
-    // Use the global DNS cache if possible
-    // TODO: There should be some sort of expiration on this, but I don't know how to get that
-    // information from the system DNS resolver
-    let addr = {
-        let mut map = ADDRS.lock().unwrap();
-        match map.get(&(host.to_string(), port)) {
-            Some(a) => *a,
-            None => {
-                let addr = (host, port)
-                    .to_socket_addrs()
-                    .map(|mut addrs| addrs.next())?
-                    .ok_or(Error::IpLookupFailed)?;
-                map.insert((host.to_string(), port), addr);
-                addr
-            }
-        }
-    };
+    let addr = DNS_CACHE.lock().unwrap().lookup(host.to_string(), port)?;
 
     let dns_name =
         webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;

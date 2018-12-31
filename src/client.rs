@@ -2,8 +2,6 @@ use crate::tls::TlsClient;
 use crate::{parse_response, Error, Request, Response};
 use futures::sync::oneshot;
 use mio::net::TcpStream;
-use std::collections::HashMap;
-use std::net::ToSocketAddrs;
 use std::sync::mpsc;
 
 const NEW_CLIENT: mio::Token = mio::Token(0);
@@ -25,7 +23,6 @@ const NEW_CLIENT: mio::Token = mio::Token(0);
 pub struct Client {
     sender: mpsc::SyncSender<(TlsClient, oneshot::Sender<Vec<u8>>)>,
     readiness: mio::SetReadiness,
-    addrs: HashMap<(String, u16), std::net::SocketAddr>,
 }
 
 impl Client {
@@ -33,17 +30,10 @@ impl Client {
         let host = req.uri().host().ok_or(Error::InvalidUrl)?;
         let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
 
-        let addr = match self.addrs.get(&(host.to_string(), port)) {
-            Some(a) => *a,
-            None => {
-                let addr = (host, port)
-                    .to_socket_addrs()
-                    .map(|mut addrs| addrs.next())?
-                    .ok_or(Error::IpLookupFailed)?;
-                self.addrs.insert((host.to_string(), port), addr);
-                addr
-            }
-        };
+        let addr = crate::DNS_CACHE
+            .lock()
+            .unwrap()
+            .lookup(host.to_string(), port)?;
 
         let dns_name =
             webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
@@ -129,11 +119,7 @@ impl Client {
             }
         });
 
-        Self {
-            sender,
-            readiness,
-            addrs: HashMap::new(),
-        }
+        Self { sender, readiness }
     }
 }
 
