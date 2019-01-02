@@ -27,6 +27,8 @@ pub struct Client {
 }
 
 impl Client {
+    /// Send a Request by creating a connection and sending it to the background thread to be
+    /// polled
     pub fn send(&mut self, req: &Request) -> Result<PendingRequest, Error> {
         let host = req.uri().host().ok_or(Error::InvalidUrl)?;
         let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
@@ -52,10 +54,12 @@ impl Client {
         Ok(PendingRequest { receiver })
     }
 
+    /// Convienence method to send a GET request without a body
     pub fn get(&mut self, url: &str) -> Result<PendingRequest, Error> {
         self.send(&Request::get(url)?)
     }
 
+    /// Create a client: Launches a background thread and starts a mio Poll on it
     pub fn new() -> Self {
         let (registration, readiness) = mio::Registration::new2();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -122,11 +126,13 @@ impl Client {
     }
 }
 
+/// Represents a request that may not be completed yet
 pub struct PendingRequest {
     receiver: oneshot::Receiver<Vec<u8>>,
 }
 
 impl PendingRequest {
+    /// Block the current thread until the corresponding Request has recieved a Response
     pub fn wait(self) -> Result<Response, Error> {
         use futures::Future;
         let raw = self.receiver.wait().unwrap();

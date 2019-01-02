@@ -1,11 +1,14 @@
-//! # weeqwest
+#![warn(missing_docs)]
+//! A wee request library powered by mio and rustls; no tokio and no openssl.
 //!
-//! This crate is an 80% solution for making HTTP requests. It provides a minimal set of
-//! features that can be implemented with high performance and a small dependency tree.
-//! Wheras `reqwest` provides a super-powered `Client` that does all the things, `weeqwest`
-//! provides more ways to send requests, so you can do the fastest thing for your workload.
+//! `weeqwest` is inspired by and a reaction to `reqwest`, which is a wonderfully powerful library,
+//! but a user would be rightfully dismayed to learn they've pulled in 126 dependencies to send a single HTTP request.
+//! `weeqwest` aims to be good enough for common uses with a small dependency tree (currently 39
+//! total dependencies) and at least as good performance. This library does not aim to be a total
+//! replacement, but an alternative for some use cases.
 //!
-//! If you just need to make a single GET
+//! If you just need to make a single GET, `weeqwest` provides free functions that will do blocking
+//! I/O on the current thread:
 //! ```rust
 //! # fn run() -> Result<(), weeqwest::Error> {
 //! let response = weeqwest::get("https://www.rust-lang.org")?;
@@ -14,9 +17,7 @@
 //! # }
 //! ```
 //!
-//! Unlike `reqwest`, the free functions are faster than constructing and using a [`Client`][Client].
-//!
-//! This crate also provides a [`Client`][Client] for doing asynchronous requests, and a `Session` which uses
+//! This crate also provides a `Client` for doing parallel asynchronous requests, and a `Session` which uses
 //! HTTP keep-alive to make consecutive requests to the same domain much faster, though not in
 //! parallel.
 
@@ -26,11 +27,11 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 lazy_static::lazy_static! {
-    pub static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
+    static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
 }
 
 mod client;
-pub mod dns;
+mod dns;
 mod error;
 mod session;
 mod tls;
@@ -39,6 +40,7 @@ pub use crate::client::Client;
 pub use crate::error::Error;
 pub use crate::session::Session;
 
+/// An HTTP Request
 pub struct Request {
     uri: http::Uri,
     method: http::Method,
@@ -47,6 +49,7 @@ pub struct Request {
 }
 
 impl Request {
+    /// Creates a default HTTP GET request
     pub fn get(uri: &str) -> Result<Self, Error> {
         Ok(Self {
             uri: http::HttpTryFrom::try_from(uri)?,
@@ -56,6 +59,7 @@ impl Request {
         })
     }
 
+    /// Creates a default HTTP POST request
     pub fn post(uri: &str) -> Result<Self, Error> {
         Ok(Self {
             uri: http::HttpTryFrom::try_from(uri)?,
@@ -65,6 +69,8 @@ impl Request {
         })
     }
 
+    /// Adds a multipart/form-data body to an HTTP request, replacing the current body if one
+    /// exists
     pub fn form(mut self, form: &[(&str, &[u8])]) -> Self {
         use rand_core::{RngCore, SeedableRng};
         let mut boundary = [0u8; 70];
@@ -106,6 +112,7 @@ impl Request {
         self
     }
 
+    /// Adds a text body to an HTTP request, replacing the current body if one exists
     pub fn text(mut self, text: String) -> Self {
         self.headers.insert(
             "Content-Length",
@@ -119,6 +126,7 @@ impl Request {
         self
     }
 
+    /// Adds an HTTP header to a request
     pub fn add_header(mut self, key: &str, value: &str) -> Self {
         self.headers.append(
             http::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
@@ -127,19 +135,19 @@ impl Request {
         self
     }
 
-    pub fn uri(&self) -> &http::Uri {
+    fn uri(&self) -> &http::Uri {
         &self.uri
     }
 
-    pub fn method(&self) -> &http::Method {
+    fn method(&self) -> &http::Method {
         &self.method
     }
 
-    pub fn headers(&self) -> &http::HeaderMap {
+    fn headers(&self) -> &http::HeaderMap {
         &self.headers
     }
 
-    pub fn body(&self) -> &[u8] {
+    fn body(&self) -> &[u8] {
         &self.body
     }
 
@@ -178,6 +186,8 @@ impl Request {
     }
 }
 
+/// Sends an HTTP request by creating a rustls ClientSession and driving it with blocking I/O on
+/// the current thread
 pub fn send(req: &Request) -> Result<Response, Error> {
     use std::io::Read;
 
@@ -215,6 +225,12 @@ pub fn get(url: &str) -> Result<Response, Error> {
     send(&Request::get(url)?)
 }
 
+/// Send an HTTP POST request
+///
+/// ```rust
+/// let response = weeqwest::post("https://api.slack.com/api/api.test?foo=bar").unwrap();
+/// assert_eq!("{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.text().unwrap());
+/// ```
 pub fn post(url: &str) -> Result<Response, Error> {
     send(&Request::post(url)?)
 }
@@ -271,6 +287,7 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
     Ok(Response::new(builder.body(body)?))
 }
 
+/// A parsed HTTP response
 pub struct Response {
     inner: http::Response<Vec<u8>>,
 }
@@ -280,14 +297,12 @@ impl Response {
         Self { inner }
     }
 
-    pub fn text(&self) -> Result<&str, std::str::Utf8Error> {
-        std::str::from_utf8(self.inner.body())
-    }
-
+    /// The body of an HTTP Response, may not be UTF-8
     pub fn bytes(&self) -> &[u8] {
         &self.inner.body()
     }
 
+    /// The HTTP status code of a Response
     pub fn status(&self) -> http::StatusCode {
         self.inner.status()
     }

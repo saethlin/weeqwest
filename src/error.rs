@@ -1,5 +1,6 @@
 use std::io;
 
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
