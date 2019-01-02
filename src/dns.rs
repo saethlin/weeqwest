@@ -1,13 +1,46 @@
 use crate::Error;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::time::Instant;
 
 pub struct DnsCache {
-    addrs: HashMap<String, (IpAddr, std::time::Instant)>,
+    addrs: HashMap<String, DnsEntry>,
+}
+
+#[derive(Clone)]
+struct DnsEntry {
+    address: IpAddr,
+    expiration: Instant,
+}
+
+impl DnsCache {
+    pub fn new() -> Self {
+        Self {
+            addrs: HashMap::new(),
+        }
+    }
+
+    pub fn lookup(&mut self, host: &str) -> Result<IpAddr, Error> {
+        let now = Instant::now();
+        match self.addrs.get_mut(host) {
+            Some(entry) => {
+                // If the cache entry expired
+                if now > entry.expiration {
+                    *entry = resolve(&host)?;
+                }
+                Ok(entry.address)
+            }
+            None => {
+                let entry = resolve(&host)?;
+                self.addrs.insert(host.to_string(), entry.clone());
+                Ok(entry.address)
+            }
+        }
+    }
 }
 
 // TODO: Currently only works on ipv4 addrs
-pub fn resolve(domain: &str) -> std::io::Result<(IpAddr, std::time::Duration)> {
+fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("socket couldn't open");
     sock.connect("8.8.8.8:53").expect("socket couldn't connect");
     let mut message = Vec::with_capacity(100);
@@ -44,41 +77,15 @@ pub fn resolve(domain: &str) -> std::io::Result<(IpAddr, std::time::Duration)> {
         + answer[9] as u64;
     let rdlength = ((answer[10] as u16) << 8) + (answer[11] as u16);
 
-    assert_eq!(rdlength, 4);
+    assert_eq!(
+        rdlength, 4,
+        "Expected an IPv4 address from DNS query, got something else"
+    );
 
-    Ok((
-        IpAddr::V4(Ipv4Addr::new(
+    Ok(DnsEntry {
+        address: IpAddr::V4(Ipv4Addr::new(
             answer[12], answer[13], answer[14], answer[15],
         )),
-        std::time::Duration::new(ttl, 0),
-    ))
-}
-
-impl DnsCache {
-    pub fn new() -> Self {
-        Self {
-            addrs: HashMap::new(),
-        }
-    }
-
-    pub fn lookup(&mut self, host: &str) -> Result<IpAddr, Error> {
-        match self.addrs.get(host) {
-            Some((mut addr, instant)) => {
-                // If the cache entry expired
-                if instant.elapsed() > std::time::Duration::new(3600, 0) {
-                    let resolution = resolve(&host)?;
-                    addr = resolution.0;
-                    self.addrs
-                        .insert(host.to_string(), (addr, std::time::Instant::now()));
-                }
-                Ok(addr)
-            }
-            None => {
-                let addr = resolve(&host)?.0;
-                self.addrs
-                    .insert(host.to_string(), (addr, std::time::Instant::now()));
-                Ok(addr)
-            }
-        }
-    }
+        expiration: Instant::now() + std::time::Duration::new(ttl, 0),
+    })
 }
