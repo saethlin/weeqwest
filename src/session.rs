@@ -1,6 +1,7 @@
 use crate::tls::TlsClient;
 use crate::{parse_response, Error, Request, Response};
 use mio::net::TcpStream;
+use std::net::SocketAddr;
 
 pub struct Session {
     hostname: String,
@@ -11,14 +12,11 @@ pub struct Session {
 
 impl Session {
     pub fn new(hostname: &str) -> Result<Self, Error> {
-        let addr = crate::DNS_CACHE
-            .lock()
-            .unwrap()
-            .lookup(hostname.to_string(), 443)?;
+        let addr = crate::DNS_CACHE.lock().unwrap().lookup(hostname)?;
 
         let dns_name = webpki::DNSNameRef::try_from_ascii_str(&hostname)
             .map_err(|_| Error::InvalidHostname)?;
-        let socket = TcpStream::connect(&addr)?;
+        let socket = TcpStream::connect(&SocketAddr::new(addr, 443))?;
         let tlsclient = TlsClient::new(socket, dns_name);
 
         let mut poll = mio::Poll::new()?;

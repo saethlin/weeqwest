@@ -22,6 +22,7 @@
 
 use crate::dns::DnsCache;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 lazy_static::lazy_static! {
@@ -29,7 +30,7 @@ lazy_static::lazy_static! {
 }
 
 mod client;
-mod dns;
+pub mod dns;
 mod error;
 mod session;
 mod tls;
@@ -118,6 +119,14 @@ impl Request {
         self
     }
 
+    pub fn add_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.append(
+            http::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
+            http::header::HeaderValue::from_str(value).unwrap(),
+        );
+        self
+    }
+
     pub fn uri(&self) -> &http::Uri {
         &self.uri
     }
@@ -174,16 +183,15 @@ pub fn send(req: &Request) -> Result<Response, Error> {
 
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
     let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
-
-    let addr = DNS_CACHE.lock().unwrap().lookup(host.to_string(), port)?;
+    let addr = DNS_CACHE.lock().unwrap().lookup(host)?;
 
     let dns_name =
         webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
-    let mut sock = std::net::TcpStream::connect(&addr)?;
+
+    let mut sock = std::net::TcpStream::connect(&SocketAddr::new(addr, port))?;
     let mut sess = rustls::ClientSession::new(&tls::CONFIG, dns_name);
     let mut tls = rustls::Stream::new(&mut sess, &mut sock);
 
-    // Send the request
     req.write_to(&mut tls)?;
 
     let mut raw = Vec::new();

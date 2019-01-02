@@ -2,6 +2,7 @@ use crate::tls::TlsClient;
 use crate::{parse_response, Error, Request, Response};
 use futures::sync::oneshot;
 use mio::net::TcpStream;
+use std::net::SocketAddr;
 use std::sync::mpsc;
 
 const NEW_CLIENT: mio::Token = mio::Token(0);
@@ -30,14 +31,12 @@ impl Client {
         let host = req.uri().host().ok_or(Error::InvalidUrl)?;
         let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
 
-        let addr = crate::DNS_CACHE
-            .lock()
-            .unwrap()
-            .lookup(host.to_string(), port)?;
+        let addr = crate::DNS_CACHE.lock().unwrap().lookup(host)?;
 
         let dns_name =
             webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
-        let sock = TcpStream::connect(&addr)?;
+
+        let sock = TcpStream::connect(&SocketAddr::new(addr, port))?;
         let mut tlsclient = TlsClient::new(sock, dns_name);
 
         req.write_to(&mut tlsclient)?;
