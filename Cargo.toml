@@ -5,17 +5,15 @@ authors = ["Ben Kimock <kimockb@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-mio = {version = "0.6", default-features = false}
+httparse = "1.0"
+http = "0.1"
+lazy_static = "1.0"
+
+# TLS
 rustls = {version = "0.14", default-features = false}
 webpki = "0.18"
 webpki-roots = "0.15"
-httparse = "1.0"
-lazy_static = "1.0"
-http = "0.1"
 
-# Used for generating multipart boundaries
-rand_hc = "0.1"
-rand_core = "0.3"
-
-# Only used for client's channel
+# async
+mio = {version = "0.6", default-features = false}
 futures = "0.1"

@@ -3,7 +3,7 @@
 //!
 //! `weeqwest` is inspired by and a reaction to `reqwest`, which is a wonderfully powerful library,
 //! but a user would be rightfully dismayed to learn they've pulled in 126 dependencies to send a single HTTP request.
-//! `weeqwest` aims to be good enough for common uses with a small dependency tree (currently 39
+//! `weeqwest` aims to be good enough for common uses with a small dependency tree (currently 37
 //! total dependencies) and at least as good performance. This library does not aim to be a total
 //! replacement, but an alternative for some use cases.
 //!
@@ -23,7 +23,6 @@
 
 use crate::dns::DnsCache;
 use std::io::Write;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 lazy_static::lazy_static! {
@@ -33,12 +32,10 @@ lazy_static::lazy_static! {
 mod client;
 mod dns;
 mod error;
-mod session;
 mod tls;
 
 pub use crate::client::Client;
 pub use crate::error::Error;
-pub use crate::session::Session;
 
 /// An HTTP Request
 pub struct Request {
@@ -72,31 +69,21 @@ impl Request {
     /// Adds a multipart/form-data body to an HTTP request, replacing the current body if one
     /// exists
     pub fn form(mut self, form: &[(&str, &[u8])]) -> Self {
-        use rand_core::{RngCore, SeedableRng};
-        let mut boundary = [0u8; 70];
-        let mut rng = ::rand_hc::Hc128Rng::seed_from_u64(0);
-        // Cross our fingers and hope we don't have a collision
-        // TODO: Use more range in here. Possibly all of it?
-        rng.fill_bytes(&mut boundary);
-        for b in boundary.iter_mut() {
-            *b = (*b % 26) + 97;
-        }
-        let boundary = std::str::from_utf8(&boundary).unwrap();
+        let boundary = r#"I?|06_L6z%C<upUQ>;C0SVRrr{j(V]3#aY"%}P-!n8!0TWVlKx!UF>@U}`$-qD/o[o%|:i"#;
 
         // Write the contents of form into self.body
         self.body.clear();
 
         for (name, item) in form {
-            write!(
+            let _ = write!(
                 self.body,
                 "\r\n--{}\r\nContent-Disposition: form-data; name={:?}\r\n\r\n",
                 boundary, name
-            )
-            .unwrap();
+            );
             self.body.extend_from_slice(&item);
             self.body.extend_from_slice(b"\r\n");
         }
-        write!(self.body, "--{}--", boundary).unwrap();
+        let _ = write!(self.body, "--{}--", boundary);
 
         self.headers.insert(
             "Content-Length",
@@ -198,7 +185,7 @@ pub fn send(req: &Request) -> Result<Response, Error> {
     let dns_name =
         webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
 
-    let mut sock = std::net::TcpStream::connect(&SocketAddr::new(addr, port))?;
+    let mut sock = std::net::TcpStream::connect((addr, port))?;
     let mut sess = rustls::ClientSession::new(&tls::CONFIG, dns_name);
     let mut tls = rustls::Stream::new(&mut sess, &mut sock);
 
