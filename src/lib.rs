@@ -17,9 +17,7 @@
 //! # }
 //! ```
 //!
-//! This crate also provides a `Client` for doing parallel asynchronous requests, and a `Session` which uses
-//! HTTP keep-alive to make consecutive requests to the same domain much faster, though not in
-//! parallel.
+//! This crate also provides a `Client` for running multiple requests in parallel on a background thread.
 
 use crate::dns::DnsCache;
 use std::io::Write;
@@ -27,13 +25,24 @@ use std::sync::{Arc, Mutex};
 
 lazy_static::lazy_static! {
     static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
+
+    static ref TLS_CONFIG: Arc<rustls::ClientConfig> = {
+        let mut config = rustls::ClientConfig::new();
+        config
+            .root_store
+            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+        Arc::new(config)
+    };
 }
 
+#[cfg(feature = "client")]
 mod client;
 mod dns;
 mod error;
+#[cfg(feature = "client")]
 mod tls;
 
+#[cfg(feature = "client")]
 pub use crate::client::Client;
 pub use crate::error::Error;
 
@@ -138,7 +147,7 @@ impl Request {
         &self.body
     }
 
-    fn write_to(&self, tls: &mut std::io::Write) -> Result<(), Error> {
+    fn write_to(&self, stream: &mut std::io::Write) -> Result<(), Error> {
         let host = self.uri().host().ok_or(Error::InvalidUrl)?;
         let path = self
             .uri()
@@ -148,7 +157,7 @@ impl Request {
 
         // Write the HTTP header
         write!(
-            tls,
+            stream,
             "{} {} HTTP/1.1\r\n\
              Host: {}\r\n\
              Connection: close\r\n\
@@ -159,15 +168,15 @@ impl Request {
         )?;
 
         for (key, value) in self.headers() {
-            write!(tls, "{}: ", key)?;
-            tls.write_all(value.as_bytes())?;
-            tls.write_all(b"\r\n")?;
+            write!(stream, "{}: ", key)?;
+            stream.write_all(value.as_bytes())?;
+            stream.write_all(b"\r\n")?;
         }
 
-        tls.write_all(b"\r\n")?;
+        stream.write_all(b"\r\n")?;
 
         // Write the HTTP body
-        tls.write_all(self.body())?;
+        stream.write_all(self.body())?;
 
         Ok(())
     }
@@ -186,7 +195,7 @@ pub fn send(req: &Request) -> Result<Response, Error> {
         webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
 
     let mut sock = std::net::TcpStream::connect((addr, port))?;
-    let mut sess = rustls::ClientSession::new(&tls::CONFIG, dns_name);
+    let mut sess = rustls::ClientSession::new(&TLS_CONFIG, dns_name);
     let mut tls = rustls::Stream::new(&mut sess, &mut sock);
 
     req.write_to(&mut tls)?;

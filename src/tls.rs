@@ -3,17 +3,6 @@ use mio::event::Event;
 use mio::net::TcpStream;
 use rustls::Session;
 use std::io::{self, Read};
-use std::sync::Arc;
-
-lazy_static::lazy_static! {
-    pub static ref CONFIG: Arc<rustls::ClientConfig> = {
-        let mut config = rustls::ClientConfig::new();
-        config
-            .root_store
-            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
-        Arc::new(config)
-    };
-}
 
 /// This encapsulates the TCP-level connection, some connection
 /// state, and the underlying TLS-level session.
@@ -44,7 +33,7 @@ impl TlsClient {
             socket: sock,
             closing: false,
             clean_closure: false,
-            tls_session: rustls::ClientSession::new(&CONFIG, hostname),
+            tls_session: rustls::ClientSession::new(&crate::TLS_CONFIG, hostname),
             buf: Vec::new(),
             token: mio::Token(0), // invalid value
         }
@@ -158,15 +147,6 @@ impl TlsClient {
 
     pub fn take_bytes(&mut self) -> Vec<u8> {
         std::mem::replace(&mut self.buf, Vec::new())
-    }
-
-    pub fn response_done(&self) -> bool {
-        // This happens a lot at the beginning of a connection
-        if self.buf.is_empty() {
-            return false;
-        }
-
-        self.buf.ends_with(b"\r\n0\r\n\r\n")
     }
 }
 
