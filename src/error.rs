@@ -4,6 +4,7 @@ use std::io;
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
+    #[cfg(feature = "tls")]
     Tls(rustls::TLSError),
     Parse(httparse::Error),
     Http(http::Error),
@@ -11,6 +12,7 @@ pub enum Error {
     InvalidHostname,
     IpLookupFailed,
     InvalidUrl,
+    UnsupportedScheme,
 }
 
 impl From<io::Error> for Error {
@@ -19,6 +21,7 @@ impl From<io::Error> for Error {
     }
 }
 
+#[cfg(feature = "tls")]
 impl From<rustls::TLSError> for Error {
     fn from(e: rustls::TLSError) -> Error {
         Error::Tls(e)

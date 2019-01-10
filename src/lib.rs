@@ -10,11 +10,8 @@
 //! If you just need to make a single GET, `weeqwest` provides free functions that will do blocking
 //! I/O on the current thread:
 //! ```rust
-//! # fn run() -> Result<(), weeqwest::Error> {
-//! let response = weeqwest::get("https://www.rust-lang.org")?;
-//! println!("body = {:?}", response.text()?); // Response body may not be UTF-8
-//! # Ok(())
-//! # }
+//! let response = weeqwest::get("https://httpbin.org/get/").unwrap();
+//! println!("body = {}", std::str::from_utf8(response.bytes()).unwrap()); // Response body may not be UTF-8
 //! ```
 //!
 //! This crate also provides a `Client` for running multiple requests in parallel on a background thread.
@@ -26,6 +23,10 @@ use std::sync::{Arc, Mutex};
 lazy_static::lazy_static! {
     static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
 
+}
+
+#[cfg(feature = "tls")]
+lazy_static::lazy_static! {
     static ref TLS_CONFIG: Arc<rustls::ClientConfig> = {
         let mut config = rustls::ClientConfig::new();
         config
@@ -39,7 +40,7 @@ lazy_static::lazy_static! {
 mod client;
 mod dns;
 mod error;
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", feature = "tls"))]
 mod tls;
 
 #[cfg(feature = "client")]
@@ -184,30 +185,66 @@ impl Request {
 
 /// Sends an HTTP request by creating a rustls ClientSession and driving it with blocking I/O on
 /// the current thread
+#[cfg(feature = "tls")]
 pub fn send(req: &Request) -> Result<Response, Error> {
     use std::io::Read;
 
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
-    let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
     let addr = DNS_CACHE.lock().unwrap().lookup(host)?;
 
-    let dns_name =
-        webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
-
-    let mut sock = std::net::TcpStream::connect((addr, port))?;
-    let mut sess = rustls::ClientSession::new(&TLS_CONFIG, dns_name);
-    let mut tls = rustls::Stream::new(&mut sess, &mut sock);
-
-    req.write_to(&mut tls)?;
+    let scheme = req.uri().scheme_part().unwrap_or(&http::uri::Scheme::HTTPS);
 
     let mut raw = Vec::new();
-    if let Err(e) = tls.read_to_end(&mut raw) {
-        use std::error::Error;
-        if e.description() != "CloseNotify alert received" {
-            return Err(e.into());
+    if scheme == &http::uri::Scheme::HTTPS {
+        let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
+        let dns_name =
+            webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
+
+        let mut sock = std::net::TcpStream::connect((addr, port))?;
+        let mut sess = rustls::ClientSession::new(&TLS_CONFIG, dns_name);
+        let mut tls = rustls::Stream::new(&mut sess, &mut sock);
+
+        req.write_to(&mut tls)?;
+
+        if let Err(e) = tls.read_to_end(&mut raw) {
+            use std::error::Error;
+            if e.description() != "CloseNotify alert received" {
+                return Err(e.into());
+            }
         }
+    } else if scheme == &http::uri::Scheme::HTTP {
+        let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(80);
+        let mut stream = std::net::TcpStream::connect((addr, port))?;
+
+        req.write_to(&mut stream)?;
+
+        stream.read_to_end(&mut raw)?;
+    } else {
+        return Err(Error::UnsupportedScheme);
     }
 
+    parse_response(&raw)
+}
+
+/// Sends an HTTP request
+#[cfg(not(feature = "tls"))]
+pub fn send(req: &Request) -> Result<Response, Error> {
+    use std::io::Read;
+
+    if req.uri().scheme_part().unwrap_or(&http::uri::Scheme::HTTP) != &http::uri::Scheme::HTTP {
+        return Err(Error::UnsupportedScheme);
+    }
+
+    let host = req.uri().host().ok_or(Error::InvalidUrl)?;
+    let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(80);
+    let addr = DNS_CACHE.lock().unwrap().lookup(host)?;
+
+    let mut stream = std::net::TcpStream::connect((addr, port))?;
+
+    req.write_to(&mut stream)?;
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
     parse_response(&raw)
 }
 
@@ -215,7 +252,7 @@ pub fn send(req: &Request) -> Result<Response, Error> {
 ///
 /// ```rust
 /// let response = weeqwest::get("https://api.slack.com/api/api.test?foo=bar").unwrap();
-/// assert_eq!("{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.text().unwrap());
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.bytes());
 /// ```
 pub fn get(url: &str) -> Result<Response, Error> {
     send(&Request::get(url)?)
@@ -225,7 +262,7 @@ pub fn get(url: &str) -> Result<Response, Error> {
 ///
 /// ```rust
 /// let response = weeqwest::post("https://api.slack.com/api/api.test?foo=bar").unwrap();
-/// assert_eq!("{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.text().unwrap());
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.bytes());
 /// ```
 pub fn post(url: &str) -> Result<Response, Error> {
     send(&Request::post(url)?)
@@ -233,54 +270,64 @@ pub fn post(url: &str) -> Result<Response, Error> {
 
 fn parse_response(raw: &[u8]) -> Result<Response, Error> {
     // Read the headers, increasing storage if needed
-    let mut headers = vec![httparse::EMPTY_HEADER; 256];
-    let mut response = httparse::Response::new(&mut headers);
-    while let Err(httparse::Error::TooManyHeaders) = response.parse(&raw) {
-        headers = vec![httparse::EMPTY_HEADER; headers.len() + 256];
-        response = httparse::Response::new(&mut headers);
-    }
+    let mut n_headers = 256;
+    loop {
+        let mut headers = vec![httparse::EMPTY_HEADER; n_headers];
+        let mut response = httparse::Response::new(&mut headers);
 
-    // Initial parse fills out the response struct and jumps to the beginning of the chunks
-    let body = match response.parse(&raw)? {
-        httparse::Status::Complete(len) => {
-            let mut remaining = &raw[len..];
-            // Reserve enough space to hold all the incoming bytes so no reallocation occurs
-            let mut body = Vec::with_capacity(remaining.len());
+        match response.parse(&raw) {
+            Err(httparse::Error::TooManyHeaders) => n_headers *= 2,
+            Ok(httparse::Status::Partial) => panic!(
+                "Entire response should have been read already but wasn't. This failure indicates a bug in this library."
+            ),
+            Ok(httparse::Status::Complete(len)) => {
+                let mut remaining = &raw[len..];
+                // Reserve enough space to hold all the incoming bytes so no reallocation occurs
+                let mut body: Vec<u8> = Vec::with_capacity(remaining.len());
 
-            // Keep parsing until we run out of chunks, or have a parse error
-            while let Ok(httparse::Status::Complete((stopped, chunksize))) =
-                httparse::parse_chunk_size(remaining)
-            {
-                let end = chunksize as usize + stopped;
-                body.extend(&remaining[stopped..chunksize as usize + stopped]);
-                remaining = &remaining[end..];
+                // Parse the entire body
+                match httparse::parse_chunk_size(remaining) {
+                    Err(httparse::InvalidChunkSize) => body.extend_from_slice(remaining),
+                    Ok(httparse::Status::Complete((stopped, chunksize))) => {
+                        let end = chunksize as usize + stopped;
+                        body.extend(&remaining[stopped..chunksize as usize + stopped]);
+                        remaining = &remaining[end..];
+
+                // Keep parsing until we run out of chunks, or have a parse error
+                         while let Ok(httparse::Status::Complete((stopped, chunksize))) =
+                            httparse::parse_chunk_size(remaining)
+                            {
+                                let end = chunksize as usize + stopped;
+                                body.extend(&remaining[stopped..chunksize as usize + stopped]);
+                                remaining = &remaining[end..];
+                            }
+                    }
+                    error => panic!("{:#?}", error),
+                }
+
+
+                let status = response.code.unwrap();
+
+                let version = match response.version {
+                    Some(0) => http::Version::HTTP_10,
+                    Some(1) => http::Version::HTTP_11,
+                    _ => unimplemented!("This library does not support HTTP/2 responses"),
+                };
+
+                let mut builder = http::response::Builder::new();
+
+                builder.status(status).version(version);
+
+                for h in headers.iter().filter(|h| !h.name.is_empty()) {
+                    builder.header(h.name, h.value);
+                }
+
+                break Ok(Response::new(builder.body(body)?));
+
             }
-
-            body
+            Err(e) => panic!("{:#?}", e),
         }
-
-        httparse::Status::Partial => panic!(
-            "Entire response should have been read already but wasn't. This failure indicates a bug in this library."
-        ),
-    };
-
-    let status = response.code.unwrap();
-
-    let version = match response.version {
-        Some(0) => http::Version::HTTP_10,
-        Some(1) => http::Version::HTTP_11,
-        _ => unimplemented!("This library does not support HTTP/2 responses"),
-    };
-
-    let mut builder = http::response::Builder::new();
-
-    builder.status(status).version(version);
-
-    for h in headers.iter().filter(|h| !h.name.is_empty()) {
-        builder.header(h.name, h.value);
     }
-
-    Ok(Response::new(builder.body(body)?))
 }
 
 /// A parsed HTTP response

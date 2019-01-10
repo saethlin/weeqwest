@@ -13,7 +13,7 @@ pub struct TlsClient {
     clean_closure: bool,
     tls_session: rustls::ClientSession,
     buf: Vec<u8>,
-    pub token: mio::Token,
+    token: mio::Token,
 }
 
 /// We implement `io::Write` and pass through to the TLS session
@@ -28,15 +28,19 @@ impl io::Write for TlsClient {
 }
 
 impl TlsClient {
-    pub fn new(sock: TcpStream, hostname: webpki::DNSNameRef) -> TlsClient {
+    pub fn new(sock: TcpStream, hostname: webpki::DNSNameRef, token: mio::Token) -> TlsClient {
         TlsClient {
             socket: sock,
             closing: false,
             clean_closure: false,
             tls_session: rustls::ClientSession::new(&crate::TLS_CONFIG, hostname),
             buf: Vec::new(),
-            token: mio::Token(0), // invalid value
+            token,
         }
+    }
+
+    pub fn token(&self) -> mio::Token {
+        self.token
     }
 
     pub fn ready(&mut self, poll: &mut mio::Poll, ev: &Event) -> Result<(), Error> {
@@ -54,7 +58,7 @@ impl TlsClient {
     }
 
     /// We're ready to do a read.
-    pub fn do_read(&mut self) -> Result<(), Error> {
+    fn do_read(&mut self) -> Result<(), Error> {
         let bytes_read = self.tls_session.read_tls(&mut self.socket);
         match bytes_read {
             // Ready but no data
