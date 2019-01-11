@@ -110,14 +110,14 @@ impl Request {
     }
 
     /// Adds a text body to an HTTP request, replacing the current body if one exists
-    pub fn text(mut self, text: String) -> Self {
+    pub fn json(mut self, text: String) -> Self {
         self.headers.insert(
             "Content-Length",
             http::header::HeaderValue::from_str(&text.len().to_string()).unwrap(),
         );
         self.headers.insert(
             "Content-Type",
-            http::header::HeaderValue::from_static("text"),
+            http::header::HeaderValue::from_static("application/json"),
         );
         self.body = text.into_bytes();
         self
