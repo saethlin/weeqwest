@@ -42,6 +42,7 @@ mod dns;
 mod error;
 #[cfg(all(feature = "client", feature = "tls"))]
 mod tls;
+mod parse;
 
 #[cfg(feature = "client")]
 pub use crate::client::Client;

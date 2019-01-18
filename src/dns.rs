@@ -2,22 +2,9 @@ use crate::Error;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::Instant;
-use std::io;
-
-macro_rules! mask {
-    ($byte:expr, $($mask:expr),*) => {
-        {
-            let value = $byte;
-            ($( value & $mask , )*)
-        }
-    };
-    ($byte:expr, $($mask:expr),*,) => {
-        {
-            let value = $byte;
-            ($( value & $mask , )*)
-        }
-    };
-}
+use std::io::{self, Read};
+use crate::parse::{CursorExt, ReadExt};
+use crate::mask;
 
 pub struct DnsCache {
     addrs: HashMap<String, DnsEntry>,
@@ -89,12 +76,12 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     response.truncate(bytes_read);
     let mut response = std::io::Cursor::new(response);
 
-    if response.read2()? != [170, 170] {
+    if response.read_u16_be()? != u16::from_be_bytes([170, 170]) {
         return err("DNS response had incorrect id");
     }
 
     let (is_response, opcode, _is_authoritative, is_truncated, _recursion_desired) = mask!(
-        response.read_byte()?,
+        response.read_u8()?,
         0b10000000,
         0b01111000,
         0b00000100,
@@ -113,7 +100,7 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     }
 
     let (_rescursion_available, zero_bytes, response_code) =
-        mask!(response.read_byte()?, 0b10000000, 0b01110000, 0b00001111,);
+        mask!(response.read_u8()?, 0b10000000, 0b01110000, 0b00001111,);
 
     if zero_bytes != 0 {
         return err("Required zero bytes in DNS response are not zero");
@@ -122,21 +109,21 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
         return err("DNS server error");
     }
 
-    let question_count = u16::from_be_bytes(response.read2()?);
+    let question_count = response.read_u16_be()?;
     if question_count != 1 {
         return err("DNS response contains incorrect question count");
     }
-    let answer_count = u16::from_be_bytes(response.read2()?);
+    let answer_count = response.read_u16_be()?;
     if answer_count == 0 {
         return err("DNS response contains no answers");
     }
-    let _ns_count = u16::from_be_bytes(response.read2()?);
-    let _ar_count = u16::from_be_bytes(response.read2()?);
+    let _ns_count = response.read_u16_be()?;
+    let _ar_count = response.read_u16_be()?;
 
     let question_name = read_name(&mut response)?;
 
-    let qtype = u16::from_be_bytes(response.read2()?);
-    let qclass = u16::from_be_bytes(response.read2()?);
+    let qtype = response.read_u16_be()?;
+    let qclass = response.read_u16_be()?;
 
     if qtype != 1 {
         return err("DNS response qtype must be 1 (host address)");
@@ -148,7 +135,7 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     let start_byte = response.peek()?;
     let answer_name = if (start_byte & 0b11000000) == 0b11000000 {
         // We got a pointer
-        let pointer = u16::from_be_bytes(response.read2()?) & !0b11000000_00000000;
+        let pointer = response.read_u16_be()? & !0b11000000_00000000;
         let old_position = response.position();
         response.set_position(pointer as u64);
         let name = read_name(&mut response)?;
@@ -162,8 +149,8 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
         return err("DNS answer domain does not match question domain");
     }
 
-    let qtype = u16::from_be_bytes(response.read2()?);
-    let qclass = u16::from_be_bytes(response.read2()?);
+    let qtype = response.read_u16_be()?;
+    let qclass = response.read_u16_be()?;
 
     if qtype != 1 {
         return err("DNS response qtype must be 1 (host address)");
@@ -172,12 +159,13 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
         return err("DNS response qclass must be 1 (internet)");
     }
 
-    let ttl = u32::from_be_bytes(response.read4()?);
+    let ttl = response.read_u32_be()?;
 
-    let rdlength = u16::from_be_bytes(response.read2()?);
+    let rdlength = response.read_u16_be()?;
 
     if rdlength == 4 {
-        let ip = response.read4()?;
+        let mut ip = [0; 4];
+        response.read_exact(&mut ip)?;
         Ok(DnsEntry {
             address: IpAddr::V4(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])),
             expiration: Instant::now() + std::time::Duration::from_secs(ttl as u64),
@@ -201,12 +189,12 @@ fn err(message: &'static str) -> io::Result<DnsEntry> {
 
 fn read_name(response: &mut std::io::Cursor<Vec<u8>>) -> io::Result<String> {
     let mut name = String::new();
-    let mut name_len = response.read_byte()?;
+    let mut name_len = response.read_u8()?;
     loop {
         for _ in 0..name_len {
-            name.push(response.read_byte()? as char);
+            name.push(response.read_u8()? as char);
         }
-        name_len = response.read_byte()?;
+        name_len = response.read_u8()?;
         if name_len > 0 {
             name.push('.');
         } else {
@@ -214,38 +202,4 @@ fn read_name(response: &mut std::io::Cursor<Vec<u8>>) -> io::Result<String> {
         }
     }
     Ok(name)
-}
-
-trait CursorExt: io::Read {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        let mut byte = [0];
-        self.read_exact(&mut byte)?;
-        Ok(byte[0])
-    }
-
-    fn read2(&mut self) -> io::Result<[u8; 2]> {
-        let mut bytes = [0; 2];
-        self.read_exact(&mut bytes)?;
-        Ok(bytes)
-    }
-
-    fn read4(&mut self) -> io::Result<[u8; 4]> {
-        let mut bytes = [0; 4];
-        self.read_exact(&mut bytes)?;
-        Ok(bytes)
-    }
-
-    fn peek(&mut self) -> io::Result<u8>;
-}
-
-impl CursorExt for io::Cursor<Vec<u8>> {
-    fn peek(&mut self) -> io::Result<u8> {
-        self.get_ref()
-            .get(self.position() as usize)
-            .map(|b| *b)
-            .ok_or(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "unable to peek cursor",
-            ))
-    }
 }
