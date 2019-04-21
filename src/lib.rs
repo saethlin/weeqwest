@@ -43,6 +43,7 @@ mod error;
 //mod future;
 #[cfg(all(feature = "client", feature = "tls"))]
 mod tls;
+mod parse;
 
 #[cfg(feature = "client")]
 pub use crate::client::Client;
