@@ -40,6 +40,7 @@ lazy_static::lazy_static! {
 mod client;
 mod dns;
 mod error;
+//mod future;
 #[cfg(all(feature = "client", feature = "tls"))]
 mod tls;
 
@@ -48,6 +49,7 @@ pub use crate::client::Client;
 pub use crate::error::Error;
 
 /// An HTTP Request
+#[derive(Debug)]
 pub struct Request {
     uri: http::Uri,
     method: http::Method,
@@ -78,21 +80,20 @@ impl Request {
 
     /// Adds a multipart/form-data body to an HTTP request, replacing the current body if one
     /// exists
-    pub fn form(mut self, form: &[(&str, &[u8])]) -> Self {
-        let boundary = r#"I?|06_L6z%C<upUQ>;C0SVRrr{j(V]3#aY"%}P-!n8!0TWVlKx!UF>@U}`$-qD/o[o%|:i"#;
+    pub fn file_form(mut self, filename: &str, contents: &[u8]) -> Self {
+        let boundary = "BOUNDARYBOUNDARYBOUNDARY";
 
         // Write the contents of form into self.body
         self.body.clear();
 
-        for (name, item) in form {
-            let _ = write!(
-                self.body,
-                "\r\n--{}\r\nContent-Disposition: form-data; name={:?}\r\n\r\n",
-                boundary, name
-            );
-            self.body.extend_from_slice(&item);
-            self.body.extend_from_slice(b"\r\n");
-        }
+        let _ = write!(
+            self.body,
+            "\r\n--{}\r\nContent-Disposition: form-data; name=\"file\"; filename={:?}\r\n\
+             Content-Type: multipart/form-data\r\n\r\n",
+            boundary, filename
+        );
+        self.body.extend_from_slice(&contents);
+        self.body.extend_from_slice(b"\r\n");
         let _ = write!(self.body, "--{}--", boundary);
 
         self.headers.insert(
@@ -104,6 +105,11 @@ impl Request {
         self.headers.insert(
             "Content-Type",
             http::header::HeaderValue::from_str(&content_type).unwrap(),
+        );
+
+        self.headers.insert(
+            "Content-Transfer-Encoding",
+            http::header::HeaderValue::from_static("binary"),
         );
 
         self
@@ -153,7 +159,7 @@ impl Request {
         let path = self
             .uri()
             .path_and_query()
-            .map(|p| p.as_str())
+            .map(http::uri::PathAndQuery::as_str)
             .unwrap_or("/");
 
         // Write the HTTP header
@@ -331,6 +337,7 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
 }
 
 /// A parsed HTTP response
+#[derive(Debug)]
 pub struct Response {
     inner: http::Response<Vec<u8>>,
 }

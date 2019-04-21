@@ -7,6 +7,8 @@ use std::sync::mpsc;
 
 const NEW_CLIENT: mio::Token = mio::Token(0);
 
+type ClientResult = Result<Vec<u8>, Error>;
+
 /// A `Client` to make concurrent HTTP requests with.
 ///
 /// A `Client` is a handle to a background thread that manages a mio Poll, and can be used to
@@ -22,8 +24,14 @@ const NEW_CLIENT: mio::Token = mio::Token(0);
 /// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.bytes());
 /// ```
 pub struct Client {
-    sender: mpsc::SyncSender<(Request, oneshot::Sender<Result<Vec<u8>, Error>>)>,
+    sender: mpsc::SyncSender<(Request, oneshot::Sender<ClientResult>)>,
     readiness: mio::SetReadiness,
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Client::new()
+    }
 }
 
 enum Session {
@@ -107,7 +115,7 @@ impl Session {
         }
     }
 
-    fn send_output(self, output: oneshot::Sender<Result<Vec<u8>, Error>>) {
+    fn send_output(self, output: oneshot::Sender<ClientResult>) {
         match self {
             Session::Http { buf, .. } => {
                 let _ = output.send(Ok(buf));
@@ -192,7 +200,7 @@ impl Client {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
 
         std::thread::spawn(move || {
-            let mut sessions: Vec<(Session, oneshot::Sender<Result<Vec<u8>, Error>>)> = Vec::new();
+            let mut sessions: Vec<(Session, oneshot::Sender<ClientResult>)> = Vec::new();
 
             let mut poll = mio::Poll::new().unwrap();
             let mut events = mio::Events::with_capacity(4);
@@ -267,7 +275,7 @@ impl Client {
 
 /// Represents a request that may not be completed yet
 pub struct PendingRequest {
-    receiver: oneshot::Receiver<Result<Vec<u8>, Error>>,
+    receiver: oneshot::Receiver<ClientResult>,
 }
 
 impl PendingRequest {

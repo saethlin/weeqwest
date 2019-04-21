@@ -1,8 +1,8 @@
 use crate::Error;
 use std::collections::HashMap;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::Instant;
-use std::io;
 
 macro_rules! mask {
     ($byte:expr, $($mask:expr),*) => {
@@ -37,6 +37,9 @@ impl DnsCache {
     }
 
     pub fn lookup(&mut self, host: &str) -> Result<IpAddr, Error> {
+        if host == "localhost" {
+            return Ok(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        }
         // Check if we already have an entry for this host
         match self.addrs.get_mut(host) {
             Some(entry) => {
@@ -95,11 +98,11 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
 
     let (is_response, opcode, _is_authoritative, is_truncated, _recursion_desired) = mask!(
         response.read_byte()?,
-        0b10000000,
-        0b01111000,
-        0b00000100,
-        0b00000010,
-        0b00000001,
+        0b1000_0000,
+        0b0111_1000,
+        0b0000_0100,
+        0b0000_0010,
+        0b0000_0001,
     );
 
     if is_response == 0 {
@@ -113,7 +116,7 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     }
 
     let (_rescursion_available, zero_bytes, response_code) =
-        mask!(response.read_byte()?, 0b10000000, 0b01110000, 0b00001111,);
+        mask!(response.read_byte()?, 0b1000_0000, 0b0111_0000, 0b0000_1111,);
 
     if zero_bytes != 0 {
         return err("Required zero bytes in DNS response are not zero");
@@ -146,11 +149,11 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     }
 
     let start_byte = response.peek()?;
-    let answer_name = if (start_byte & 0b11000000) == 0b11000000 {
+    let answer_name = if (start_byte & 0b1100_0000) == 0b1100_0000 {
         // We got a pointer
         let pointer = u16::from_be_bytes(response.read2()?) & !0b11000000_00000000;
         let old_position = response.position();
-        response.set_position(pointer as u64);
+        response.set_position(u64::from(pointer));
         let name = read_name(&mut response)?;
         response.set_position(old_position); // Advance past the pointer
         name
@@ -180,7 +183,7 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
         let ip = response.read4()?;
         Ok(DnsEntry {
             address: IpAddr::V4(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])),
-            expiration: Instant::now() + std::time::Duration::from_secs(ttl as u64),
+            expiration: Instant::now() + std::time::Duration::from_secs(u64::from(ttl)),
         })
     } else {
         panic!("rdlength must be 4");
@@ -242,10 +245,7 @@ impl CursorExt for io::Cursor<Vec<u8>> {
     fn peek(&mut self) -> io::Result<u8> {
         self.get_ref()
             .get(self.position() as usize)
-            .map(|b| *b)
-            .ok_or(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "unable to peek cursor",
-            ))
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "unable to peek cursor"))
     }
 }
