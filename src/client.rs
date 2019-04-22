@@ -190,8 +190,11 @@ impl Client {
     }
 
     /// Convienence method to send a GET request without a body
-    pub fn get(&mut self, url: &str) -> Result<PendingRequest, Error> {
-        Ok(self.send(Request::get(url)?))
+    pub fn get(&mut self, url: &str) -> Result<ClientRequest, Error> {
+        Ok(ClientRequest {
+            request: Request::get(url)?,
+            client: self,
+        })
     }
 
     /// Create a client: Launches a background thread and starts a mio Poll on it
@@ -285,5 +288,37 @@ impl PendingRequest {
         // unwrap channel errors, bubble up erors from the request sending
         let raw = self.receiver.wait().unwrap()?;
         parse_response(&raw)
+    }
+}
+
+pub struct ClientRequest<'a> {
+    request: Request,
+    client: &'a mut Client,
+}
+
+impl<'a> ClientRequest<'a> {
+    pub fn send(self) -> PendingRequest {
+        self.client.send(self.request)
+    }
+
+    pub fn file_form(self, filename: &str, contents: &[u8]) -> Self {
+        ClientRequest {
+            request: self.request.file_form(filename, contents),
+            client: self.client,
+        }
+    }
+
+    pub fn json(self, text: String) -> Self {
+        ClientRequest {
+            request: self.request.json(text),
+            client: self.client,
+        }
+    }
+
+    pub fn header(self, key: &str, value: &str) -> Self {
+        ClientRequest {
+            request: self.request.header(key, value),
+            client: self.client,
+        }
     }
 }

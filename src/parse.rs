@@ -8,7 +8,10 @@ pub trait ReadExt: io::Read {
     fn read_u32_be(&mut self) -> io::Result<u32>;
 }
 
-impl<T> ReadExt for T where T: io::Read {
+impl<T> ReadExt for T
+where
+    T: io::Read,
+{
     fn read_u8(&mut self) -> io::Result<u8> {
         let mut byte = [0];
         self.read_exact(&mut byte)?;

@@ -41,9 +41,9 @@ mod client;
 mod dns;
 mod error;
 //mod future;
+mod parse;
 #[cfg(all(feature = "client", feature = "tls"))]
 mod tls;
-mod parse;
 
 #[cfg(feature = "client")]
 pub use crate::client::Client;
@@ -131,7 +131,7 @@ impl Request {
     }
 
     /// Adds an HTTP header to a request
-    pub fn add_header(mut self, key: &str, value: &str) -> Self {
+    pub fn header(mut self, key: &str, value: &str) -> Self {
         self.headers.append(
             http::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
             http::header::HeaderValue::from_str(value).unwrap(),
