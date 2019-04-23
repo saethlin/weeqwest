@@ -285,7 +285,8 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
         match response.parse(&raw) {
             Err(httparse::Error::TooManyHeaders) => n_headers *= 2,
             Ok(httparse::Status::Partial) => panic!(
-                "Entire response should have been read already but wasn't. This failure indicates a bug in this library."
+                "Entire response should have been read already but wasn't. \
+                 This failure indicates a bug in this library."
             ),
             Ok(httparse::Status::Complete(len)) => {
                 let mut remaining = &raw[len..];
@@ -293,25 +294,26 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
                 let mut body: Vec<u8> = Vec::with_capacity(remaining.len());
 
                 // Parse the entire body
-                match httparse::parse_chunk_size(remaining) {
-                    Err(httparse::InvalidChunkSize) => body.extend_from_slice(remaining),
-                    Ok(httparse::Status::Complete((stopped, chunksize))) => {
-                        let end = chunksize as usize + stopped;
-                        body.extend(&remaining[stopped..chunksize as usize + stopped]);
-                        remaining = &remaining[end..];
+                if remaining.len() > 0 {
+                    match httparse::parse_chunk_size(remaining) {
+                        Err(httparse::InvalidChunkSize) => body.extend_from_slice(remaining),
+                        Ok(httparse::Status::Complete((stopped, chunksize))) => {
+                            let end = chunksize as usize + stopped;
+                            body.extend(&remaining[stopped..chunksize as usize + stopped]);
+                            remaining = &remaining[end..];
 
-                // Keep parsing until we run out of chunks, or have a parse error
-                         while let Ok(httparse::Status::Complete((stopped, chunksize))) =
-                            httparse::parse_chunk_size(remaining)
+                            // Keep parsing until we run out of chunks, or have a parse error
+                            while let Ok(httparse::Status::Complete((stopped, chunksize))) =
+                                httparse::parse_chunk_size(remaining)
                             {
                                 let end = chunksize as usize + stopped;
                                 body.extend(&remaining[stopped..chunksize as usize + stopped]);
                                 remaining = &remaining[end..];
                             }
+                        }
+                        error => panic!("{:#?}", error),
                     }
-                    error => panic!("{:#?}", error),
                 }
-
 
                 let status = response.code.unwrap();
 
@@ -330,7 +332,6 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
                 }
 
                 break Ok(Response::new(builder.body(body)?));
-
             }
             Err(e) => panic!("{:#?}", e),
         }
