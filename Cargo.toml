@@ -10,9 +10,9 @@ http = "0.1"
 lazy_static = "1.0"
 
 # TLS
-rustls = {version = "0.14", default-features = false, optional = true}
-webpki = {version = "0.18", optional = true}
-webpki-roots = {version = "0.15", optional = true}
+rustls = {version = "0.16", default-features = false, optional = true}
+webpki = {version = "0.21", optional = true}
+webpki-roots = {version = "0.17", optional = true}
 
 # Client
 mio = {version = "0.6", default-features = false, optional = true}
