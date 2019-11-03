@@ -1,20 +1,25 @@
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
-//! A wee request library powered by mio and rustls; no tokio and no openssl.
+//! A wee HTTPS request library powered by mio and rustls; no tokio and no openssl.
 //!
-//! `weeqwest` is inspired by and a reaction to `reqwest`, which is a wonderfully powerful library,
-//! but a user would be rightfully dismayed to learn they've pulled in 126 dependencies to send a single HTTP request.
-//! `weeqwest` aims to be good enough for common uses with a small dependency tree (currently 37
-//! total dependencies) and at least as good performance. This library does not aim to be a total
-//! replacement, but an alternative for some use cases.
+//! `weeqwest` is inspired by and a reaction to `reqwest`, which is a
+//! wonderfully powerful library, but a user would be rightfully dismayed to
+//! learn they've pulled in 126 dependencies to send a single HTTP request.
+//! `weeqwest` aims to be good enough for common uses with a small dependency
+//! tree (currently 37 total dependencies) and at least as good performance.
+//! This library does not aim to be a total replacement, but an alternative for
+//! some use cases.
 //!
-//! If you just need to make a single GET, `weeqwest` provides free functions that will do blocking
-//! I/O on the current thread:
+//! If you don't mind blocking, `weeqwest` provides free functions that will do
+//! blocking I/O on the current thread:
 //! ```rust
 //! let response = weeqwest::get("https://httpbin.org/get/").unwrap();
-//! println!("body = {}", std::str::from_utf8(response.bytes()).unwrap()); // Response body may not be UTF-8
+//! // Response body may not be UTF-8
+//! println!("body = {}", std::str::from_utf8(response.bytes()).unwrap());
 //! ```
 //!
-//! This crate also provides a `Client` for running multiple requests in parallel on a background thread.
+//! This crate also provides a `Client` for running multiple requests in
+//! parallel on a background thread.
 
 use crate::dns::DnsCache;
 use std::io::Write;
@@ -22,10 +27,8 @@ use std::sync::{Arc, Mutex};
 
 lazy_static::lazy_static! {
     static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
-
 }
 
-#[cfg(feature = "tls")]
 lazy_static::lazy_static! {
     static ref TLS_CONFIG: Arc<rustls::ClientConfig> = {
         let mut config = rustls::ClientConfig::new();
@@ -37,12 +40,12 @@ lazy_static::lazy_static! {
 }
 
 #[cfg(feature = "client")]
-mod client;
+#[allow(missing_docs)]
+pub mod client;
 mod dns;
 mod error;
-//mod future;
 mod parse;
-#[cfg(all(feature = "client", feature = "tls"))]
+#[cfg(feature = "client")]
 mod tls;
 
 #[cfg(feature = "client")]
@@ -155,7 +158,7 @@ impl Request {
         &self.body
     }
 
-    fn write_to(&self, stream: &mut std::io::Write) -> Result<(), Error> {
+    fn write_to<W: std::io::Write>(&self, stream: &mut W) -> Result<(), Error> {
         let host = self.uri().host().ok_or(Error::InvalidUrl)?;
         let path = self
             .uri()
@@ -190,9 +193,8 @@ impl Request {
     }
 }
 
-/// Sends an HTTP request by creating a rustls ClientSession and driving it with blocking I/O on
+/// Send an HTTPS request by creating a rustls ClientSession and driving it with blocking I/O on
 /// the current thread
-#[cfg(feature = "tls")]
 pub fn send(req: &Request) -> Result<Response, Error> {
     use std::io::Read;
 
@@ -233,29 +235,7 @@ pub fn send(req: &Request) -> Result<Response, Error> {
     parse_response(&raw)
 }
 
-/// Sends an HTTP request
-#[cfg(not(feature = "tls"))]
-pub fn send(req: &Request) -> Result<Response, Error> {
-    use std::io::Read;
-
-    if req.uri().scheme_part().unwrap_or(&http::uri::Scheme::HTTP) != &http::uri::Scheme::HTTP {
-        return Err(Error::UnsupportedScheme);
-    }
-
-    let host = req.uri().host().ok_or(Error::InvalidUrl)?;
-    let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(80);
-    let addr = DNS_CACHE.lock().unwrap().lookup(host)?;
-
-    let mut stream = std::net::TcpStream::connect((addr, port))?;
-
-    req.write_to(&mut stream)?;
-
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    parse_response(&raw)
-}
-
-/// Send an HTTP GET request
+/// Send an HTTPS GET request
 ///
 /// ```rust
 /// let response = weeqwest::get("https://api.slack.com/api/api.test?foo=bar").unwrap();
@@ -265,7 +245,7 @@ pub fn get(url: &str) -> Result<Response, Error> {
     send(&Request::get(url)?)
 }
 
-/// Send an HTTP POST request
+/// Send an HTTPS POST request
 ///
 /// ```rust
 /// let response = weeqwest::post("https://api.slack.com/api/api.test?foo=bar").unwrap();

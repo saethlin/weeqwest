@@ -42,23 +42,7 @@ impl CursorExt for io::Cursor<Vec<u8>> {
             .map(|b| *b)
             .ok_or(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "unable to peek cursor",
+                "attempted to peek on an exhausted cursor",
             ))
     }
-}
-
-#[macro_export]
-macro_rules! mask {
-    ($byte:expr, $($mask:expr),*) => {
-        {
-            let value = $byte;
-            ($( value & $mask , )*)
-        }
-    };
-    ($byte:expr, $($mask:expr),*,) => {
-        {
-            let value = $byte;
-            ($( value & $mask , )*)
-        }
-    };
 }

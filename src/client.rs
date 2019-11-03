@@ -1,4 +1,3 @@
-#[cfg(feature = "tls")]
 use crate::tls::TlsClient;
 use crate::{parse_response, Error, Request, Response};
 use futures::sync::oneshot;
@@ -34,23 +33,12 @@ impl Default for Client {
     }
 }
 
-enum Session {
-    Http {
-        // Gonna be some raw mio stuff in this
-        stream: mio::net::TcpStream,
-        token: mio::Token,
-        buf: Vec<u8>,
-        is_closed: bool,
-    },
-    #[cfg(feature = "tls")]
-    Tls {
-        stream: TlsClient, // All the mio stuff is handled by this
-    },
+struct Session {
+    stream: TlsClient, // All the mio stuff is handled by this
 }
 
 impl Session {
     // Needs to be called inside the background thread so that we can pick a valid token
-    #[cfg(feature = "tls")]
     fn init(req: &crate::Request, token: mio::Token) -> Result<Self, Error> {
         let host = req.uri().host().ok_or(Error::InvalidUrl)?;
         let addr = crate::DNS_CACHE.lock().unwrap().lookup(host)?;
@@ -67,108 +55,30 @@ impl Session {
             let mut stream = TlsClient::new(sock, dns_name, token);
 
             req.write_to(&mut stream)?;
-            Ok(Session::Tls { stream })
-        } else if scheme == &http::uri::Scheme::HTTP {
-            let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(80);
-            let addr = SocketAddr::new(addr, port);
-            let mut stream = mio::net::TcpStream::connect(&addr)?;
-            req.write_to(&mut stream)?;
-            Ok(Session::Http {
-                stream,
-                token,
-                buf: Vec::new(),
-                is_closed: false,
-            })
-        } else {
-            Err(Error::UnsupportedScheme)
-        }
-    }
-
-    #[cfg(not(feature = "tls"))]
-    fn init(req: &crate::Request, token: mio::Token) -> Result<Self, Error> {
-        let host = req.uri().host().ok_or(Error::InvalidUrl)?;
-        let addr = crate::DNS_CACHE.lock().unwrap().lookup(host)?;
-
-        let scheme = req.uri().scheme_part().unwrap_or(&http::uri::Scheme::HTTPS);
-
-        if scheme == &http::uri::Scheme::HTTP {
-            let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(80);
-            let addr = SocketAddr::new(addr, port);
-            let mut stream = mio::net::TcpStream::connect(&addr)?;
-            req.write_to(&mut stream)?;
-            Ok(Session::Http {
-                stream,
-                token,
-                buf: Vec::new(),
-                is_closed: false,
-            })
+            Ok(Self { stream })
         } else {
             Err(Error::UnsupportedScheme)
         }
     }
 
     fn token(&self) -> mio::Token {
-        match self {
-            Session::Http { token, .. } => *token,
-            #[cfg(feature = "tls")]
-            Session::Tls { stream, .. } => stream.token(),
-        }
+        self.stream.token()
     }
 
-    fn send_output(self, output: oneshot::Sender<ClientResult>) {
-        match self {
-            Session::Http { buf, .. } => {
-                let _ = output.send(Ok(buf));
-            }
-            #[cfg(feature = "tls")]
-            Session::Tls { mut stream, .. } => {
-                let _ = output.send(Ok(stream.take_bytes()));
-            }
-        }
+    fn send_output(mut self, output: oneshot::Sender<ClientResult>) {
+        let _ = output.send(Ok(self.stream.take_bytes()));
     }
 
     fn is_closed(&self) -> bool {
-        match self {
-            Session::Http { is_closed, .. } => *is_closed,
-            #[cfg(feature = "tls")]
-            Session::Tls { stream, .. } => stream.is_closed(),
-        }
+        self.stream.is_closed()
     }
 
     fn register(&self, poll: &mut mio::Poll) -> std::io::Result<()> {
-        match self {
-            Session::Http { stream, token, .. } => poll.register(
-                stream,
-                *token,
-                mio::Ready::readable(),
-                mio::PollOpt::level() | mio::PollOpt::oneshot(),
-            ),
-            #[cfg(feature = "tls")]
-            Session::Tls { stream, .. } => stream.register(poll),
-        }
+        self.stream.register(poll)
     }
 
     fn ready(&mut self, poll: &mut mio::Poll, ev: &mio::event::Event) -> Result<(), Error> {
-        match self {
-            Session::Http {
-                stream, token, buf, ..
-            } => {
-                if ev.readiness().is_readable() {
-                    use std::io::Read;
-                    stream.read_to_end(buf)?;
-                }
-                poll.reregister(
-                    stream,
-                    *token,
-                    mio::Ready::readable(),
-                    mio::PollOpt::level() | mio::PollOpt::oneshot(),
-                )?;
-
-                Ok(())
-            }
-            #[cfg(feature = "tls")]
-            Session::Tls { stream, .. } => stream.ready(poll, ev),
-        }
+        self.stream.ready(poll, ev)
     }
 }
 
@@ -190,11 +100,8 @@ impl Client {
     }
 
     /// Convienence method to send a GET request without a body
-    pub fn get(&mut self, url: &str) -> Result<ClientRequest, Error> {
-        Ok(ClientRequest {
-            request: Request::get(url)?,
-            client: self,
-        })
+    pub fn get(&mut self, url: &str) -> Result<PendingRequest, Error> {
+        Request::get(url).map(|r| self.send(r))
     }
 
     /// Create a client: Launches a background thread and starts a mio Poll on it
@@ -291,7 +198,7 @@ impl PendingRequest {
     }
 }
 
-pub struct ClientRequest<'a> {
+struct ClientRequest<'a> {
     request: Request,
     client: &'a mut Client,
 }

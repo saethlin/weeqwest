@@ -1,6 +1,6 @@
 # weeqwest
 
-A wee HTTP client for Rust.
+A wee HTTPS client library for Rust.
 
 ## License
 

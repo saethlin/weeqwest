@@ -1,4 +1,3 @@
-use crate::mask;
 use crate::parse::{CursorExt, ReadExt};
 use crate::Error;
 use std::collections::HashMap;
@@ -44,6 +43,22 @@ impl DnsCache {
             }
         }
     }
+}
+
+#[allow(missing_docs)]
+macro_rules! mask {
+    ($byte:expr, $($mask:expr),*) => {
+        {
+            let value = $byte;
+            ($( value & $mask , )*)
+        }
+    };
+    ($byte:expr, $($mask:expr),*,) => {
+        {
+            let value = $byte;
+            ($( value & $mask , )*)
+        }
+    };
 }
 
 // TODO: Currently only works on ipv4 addrs
