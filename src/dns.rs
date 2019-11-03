@@ -63,9 +63,8 @@ macro_rules! mask {
 
 // TODO: Currently only works on ipv4 addrs
 fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
-    let sock = UdpSocket::bind("0.0.0.0:0").expect("UDP socket for DNS resolution couldn't open");
-    sock.connect("8.8.8.8:53")
-        .expect("UDP socket for DNS resolution couldn't connect to 8.8.8.8:53");
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.connect("8.8.8.8:53")?;
     let mut message = Vec::with_capacity(100);
     // UDP header
     message.extend_from_slice(&[
@@ -86,11 +85,11 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     // QTYPE, QCLASS
     message.extend_from_slice(&[0, 1, 0, 1]);
 
-    sock.send(&message).expect("couldn't send data");
+    sock.send(&message)?;
 
     let mut response = vec![0; 1024];
 
-    let bytes_read = sock.recv(response.as_mut_slice()).expect("read failed");
+    let bytes_read = sock.recv(response.as_mut_slice())?;
     response.truncate(bytes_read);
     let mut response = std::io::Cursor::new(response);
 
