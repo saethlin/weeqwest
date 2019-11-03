@@ -39,10 +39,12 @@ impl CursorExt for io::Cursor<Vec<u8>> {
     fn peek(&mut self) -> io::Result<u8> {
         self.get_ref()
             .get(self.position() as usize)
-            .map(|b| *b)
-            .ok_or(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "attempted to peek on an exhausted cursor",
-            ))
+            .copied()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "attempted to peek on an exhausted cursor",
+                )
+            })
     }
 }
