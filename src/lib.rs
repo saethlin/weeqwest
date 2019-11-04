@@ -67,10 +67,12 @@ impl Request {
     /// Creates a default HTTP GET request
     #[inline]
     pub fn get(uri: &str) -> Result<Self, Error> {
+        let mut headers = http::HeaderMap::with_capacity(1);
+        headers.insert("Accept-Encoding", http::HeaderValue::from_static("gzip"));
         Ok(Self {
             uri: http::HttpTryFrom::try_from(uri)?,
             method: http::Method::GET,
-            headers: http::HeaderMap::new(),
+            headers,
             body: Vec::new(),
         })
     }
@@ -184,8 +186,7 @@ impl Request {
             stream,
             "{} {} HTTP/1.1\r\n\
              Host: {}\r\n\
-             Connection: close\r\n\
-             Accept-Encoding: identity\r\n",
+             Connection: close\r\n",
             self.method().as_str(),
             path,
             host
@@ -278,7 +279,7 @@ pub fn post(url: &str) -> Result<Response, Error> {
 fn parse_response(raw: &[u8]) -> Result<Response, Error> {
     // Read the headers, increasing storage if needed
     let mut n_headers = 256;
-    loop {
+    let (mut builder, mut body) = loop {
         let mut headers = vec![httparse::EMPTY_HEADER; n_headers];
         let mut response = httparse::Response::new(&mut headers);
 
@@ -335,11 +336,24 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
                     builder.header(h.name, h.value);
                 }
 
-                break Ok(Response::new(builder.body(body)?));
+                break (builder, body);
             }
             Err(e) => panic!("{:#?}", e),
         }
+    };
+    if builder
+        .headers_ref()
+        .map(|h| h.get_all("Content-Encoding").iter().any(|v| v == "gzip"))
+        .unwrap_or(false)
+    {
+        use std::io::Read;
+        let mut decoder = libflate::gzip::Decoder::new(&body[..])?;
+        let mut decoded_body = Vec::new();
+        decoder.read_to_end(&mut decoded_body)?;
+        body = decoded_body;
     }
+
+    Ok(Response::new(builder.body(body)?))
 }
 
 /// A parsed HTTP response
