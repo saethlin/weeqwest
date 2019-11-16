@@ -12,11 +12,5 @@ lazy_static = "1.0"
 rustls = {version = "0.16", default-features = false}
 webpki = "0.21"
 webpki-roots = "0.18"
-
-# Client
-mio = {version = "0.6", default-features = false, optional = true}
-futures = {version = "0.1", optional = true}
-
-[features]
-default = []
-client = ["mio", "futures"]
+mio = {version = "0.6", default-features = false}
+futures = "0.1"

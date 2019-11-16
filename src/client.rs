@@ -132,14 +132,14 @@ impl Client {
 
                         // Pick an unused token value for the new session
                         // Token 0 indicates a new client, do not use for running clients
-                        let mut token = mio::Token(0);
+                        let mut token = NEW_CLIENT;
                         for v in 1..usize::max_value() {
                             if !sessions.iter().any(|s| s.0.token() == mio::Token(v)) {
                                 token = mio::Token(v);
                                 break;
                             }
                         }
-                        assert!(token != mio::Token(0));
+                        assert!(token != NEW_CLIENT);
 
                         match Session::init(&request, token) {
                             Ok(session) => {
@@ -162,7 +162,7 @@ impl Client {
                     }
                 }
 
-                // Events have been handled, see if any clients are done
+                // Events have been handled, see if any sessions are done
                 // This operation is a drain_filter
                 let mut i = 0;
                 while i != sessions.len() {

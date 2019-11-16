@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![deny(clippy::all, clippy::result_unwrap_used, clippy::option_unwrap_used)]
-//#![warn(clippy::restriction)]
-//#![allow(clippy::implicit_return, clippy::missing_docs_in_private_items)]
+#![warn(clippy::restriction)]
+#![allow(
+    clippy::implicit_return,
+    clippy::missing_docs_in_private_items,
+    clippy::missing_inline_in_public_items
+)]
 //! A wee HTTPS request library powered by mio and rustls; no tokio and no openssl.
 //!
 //! `weeqwest` is inspired by and a reaction to `reqwest`, which is a
@@ -18,7 +22,7 @@
 //! ```rust
 //! let response = weeqwest::get("https://httpbin.org/get/").unwrap();
 //! // Response body may not be UTF-8
-//! println!("body = {}", std::str::from_utf8(response.bytes()).unwrap());
+//! println!("body = {}", std::str::from_utf8(response.body()).unwrap());
 //! ```
 //!
 //! This crate also provides a `Client` for running multiple requests in
@@ -65,7 +69,6 @@ pub struct Request {
 
 impl Request {
     /// Creates a default HTTP GET request
-    #[inline]
     pub fn get(uri: &str) -> Result<Self, Error> {
         let mut headers = http::HeaderMap::with_capacity(1);
         headers.insert("Accept-Encoding", http::HeaderValue::from_static("gzip"));
@@ -78,7 +81,6 @@ impl Request {
     }
 
     /// Creates a default HTTP POST request
-    #[inline]
     pub fn post(uri: &str) -> Result<Self, Error> {
         Ok(Self {
             uri: http::HttpTryFrom::try_from(uri)?,
@@ -90,7 +92,6 @@ impl Request {
 
     /// Adds a multipart/form-data body to an HTTP request, replacing the current body if one
     /// exists
-    #[inline]
     pub fn file_form(mut self, filename: &str, contents: &[u8]) -> Self {
         let boundary = "BOUNDARYBOUNDARYBOUNDARY";
 
@@ -128,7 +129,6 @@ impl Request {
     }
 
     /// Adds a text body to an HTTP request, replacing the current body if one exists
-    #[inline]
     pub fn json(mut self, text: String) -> Self {
         self.headers.insert(
             "Content-Length",
@@ -143,7 +143,6 @@ impl Request {
     }
 
     /// Adds an HTTP header to a request
-    #[inline]
     pub fn header(mut self, key: &str, value: &str) -> Self {
         self.headers.append(
             http::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
@@ -152,27 +151,22 @@ impl Request {
         self
     }
 
-    #[inline]
     fn uri(&self) -> &http::Uri {
         &self.uri
     }
 
-    #[inline]
     fn method(&self) -> &http::Method {
         &self.method
     }
 
-    #[inline]
     fn headers(&self) -> &http::HeaderMap {
         &self.headers
     }
 
-    #[inline]
     fn body(&self) -> &[u8] {
         &self.body
     }
 
-    #[inline]
     fn write_to<W: std::io::Write>(&self, stream: &mut W) -> Result<(), Error> {
         let host = self.uri().host().ok_or(Error::InvalidUrl)?;
         let path = self
@@ -209,7 +203,6 @@ impl Request {
 
 /// Send an HTTPS request by creating a rustls ClientSession and driving it with blocking I/O on
 /// the current thread
-#[inline]
 pub fn send(req: &Request) -> Result<Response, Error> {
     use std::io::Read;
 
@@ -257,9 +250,8 @@ pub fn send(req: &Request) -> Result<Response, Error> {
 ///
 /// ```rust
 /// let response = weeqwest::get("https://api.slack.com/api/api.test?foo=bar").unwrap();
-/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.bytes());
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
 /// ```
-#[inline]
 pub fn get(url: &str) -> Result<Response, Error> {
     send(&Request::get(url)?)
 }
@@ -268,9 +260,8 @@ pub fn get(url: &str) -> Result<Response, Error> {
 ///
 /// ```rust
 /// let response = weeqwest::post("https://api.slack.com/api/api.test?foo=bar").unwrap();
-/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.bytes());
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
 /// ```
-#[inline]
 pub fn post(url: &str) -> Result<Response, Error> {
     send(&Request::post(url)?)
 }
@@ -367,13 +358,11 @@ impl Response {
     }
 
     /// The body of an HTTP Response, may not be UTF-8
-    #[inline]
-    pub fn bytes(&self) -> &[u8] {
+    pub fn body(&self) -> &[u8] {
         &self.inner.body()
     }
 
     /// The HTTP status code of a Response
-    #[inline]
     pub fn status(&self) -> http::StatusCode {
         self.inner.status()
     }
