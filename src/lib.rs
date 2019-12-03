@@ -29,6 +29,7 @@
 //! parallel on a background thread.
 
 use crate::dns::DnsCache;
+use std::convert::TryFrom;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -73,7 +74,7 @@ impl Request {
         let mut headers = http::HeaderMap::with_capacity(1);
         headers.insert("Accept-Encoding", http::HeaderValue::from_static("gzip"));
         Ok(Self {
-            uri: http::HttpTryFrom::try_from(uri)?,
+            uri: http::Uri::try_from(uri)?,
             method: http::Method::GET,
             headers,
             body: Vec::new(),
@@ -83,7 +84,7 @@ impl Request {
     /// Creates a default HTTP POST request
     pub fn post(uri: &str) -> Result<Self, Error> {
         Ok(Self {
-            uri: http::HttpTryFrom::try_from(uri)?,
+            uri: http::Uri::try_from(uri)?,
             method: http::Method::POST,
             headers: http::HeaderMap::new(),
             body: Vec::new(),
@@ -212,11 +213,11 @@ pub fn send(req: &Request) -> Result<Response, Error> {
         Err(_) => DnsCache::new().lookup(host)?,
     };
 
-    let scheme = req.uri().scheme_part().unwrap_or(&http::uri::Scheme::HTTPS);
+    let scheme = req.uri().scheme().unwrap_or(&http::uri::Scheme::HTTPS);
 
     let mut raw = Vec::new();
     if scheme == &http::uri::Scheme::HTTPS {
-        let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
+        let port = req.uri().port_u16().unwrap_or(443);
         let dns_name =
             webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
 
@@ -233,7 +234,7 @@ pub fn send(req: &Request) -> Result<Response, Error> {
             }
         }
     } else if scheme == &http::uri::Scheme::HTTP {
-        let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(80);
+        let port = req.uri().port().map(|p| p.as_u16()).unwrap_or(80);
         let mut stream = std::net::TcpStream::connect((addr, port))?;
 
         req.write_to(&mut stream)?;
@@ -270,7 +271,7 @@ pub fn post(url: &str) -> Result<Response, Error> {
 fn parse_response(raw: &[u8]) -> Result<Response, Error> {
     // Read the headers, increasing storage if needed
     let mut n_headers = 256;
-    let (mut builder, mut body) = loop {
+    let (builder, mut body) = loop {
         let mut headers = vec![httparse::EMPTY_HEADER; n_headers];
         let mut response = httparse::Response::new(&mut headers);
 
@@ -319,12 +320,12 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
                     _ => unimplemented!("This library does not support HTTP/2 responses"),
                 };
 
-                let mut builder = http::response::Builder::new();
-
-                builder.status(status).version(version);
+                let mut builder = http::response::Builder::new()
+                    .status(status)
+                    .version(version);
 
                 for h in headers.iter().filter(|h| !h.name.is_empty()) {
-                    builder.header(h.name, h.value);
+                    builder = builder.header(h.name, h.value);
                 }
 
                 break (builder, body);
