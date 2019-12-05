@@ -43,10 +43,10 @@ impl Session {
         let host = req.uri().host().ok_or(Error::InvalidUrl)?;
         let addr = crate::DNS_CACHE.lock().unwrap().lookup(host)?;
 
-        let scheme = req.uri().scheme_part().unwrap_or(&http::uri::Scheme::HTTPS);
+        let scheme = req.uri().scheme().unwrap_or(&http::uri::Scheme::HTTPS);
 
         if scheme == &http::uri::Scheme::HTTPS {
-            let port = req.uri().port_part().map(|p| p.as_u16()).unwrap_or(443);
+            let port = req.uri().port_u16().unwrap_or(443);
             let addr = SocketAddr::new(addr, port);
             let dns_name =
                 webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;

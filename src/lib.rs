@@ -47,16 +47,13 @@ lazy_static::lazy_static! {
     };
 }
 
-#[cfg(feature = "client")]
 #[allow(missing_docs)]
 pub mod client;
 mod dns;
 mod error;
 mod parse;
-#[cfg(feature = "client")]
 mod tls;
 
-#[cfg(feature = "client")]
 pub use crate::client::Client;
 pub use crate::error::Error;
 
