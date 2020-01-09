@@ -20,7 +20,7 @@ type ClientResult = Result<Vec<u8>, Error>;
 /// let handle = client.get("https://api.slack.com/api/api.test?foo=bar").unwrap();
 /// // Some time later
 /// let response = handle.wait().unwrap();
-/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.bytes());
+/// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
 /// ```
 pub struct Client {
     sender: mpsc::SyncSender<(Request, oneshot::Sender<ClientResult>)>,
