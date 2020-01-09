@@ -7,7 +7,7 @@
     clippy::missing_docs_in_private_items,
     clippy::missing_inline_in_public_items
 )]
-//! A wee HTTPS request library powered by mio and rustls; no tokio and no openssl.
+//! A wee HTTPS request library powered by rustls.
 //!
 //! `weeqwest` is inspired by and a reaction to `reqwest`, which is a
 //! wonderfully powerful library, but a user would be rightfully dismayed to
@@ -20,7 +20,11 @@
 //! If you don't mind blocking, `weeqwest` provides free functions that will do
 //! blocking I/O on the current thread:
 //! ```rust
-//! let response = weeqwest::get("https://httpbin.org/get/").unwrap();
+//! let request = weeqwest::get("https://httpbin.org/get/");
+//! let response = tokio::runtime::Runtime::new()
+//!    .unwrap()
+//!    .block_on(request)
+//!    .unwrap();
 //! // Response body may not be UTF-8
 //! println!("body = {}", std::str::from_utf8(response.body()).unwrap());
 //! ```
@@ -30,7 +34,6 @@
 
 use crate::dns::DnsCache;
 use std::convert::TryFrom;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 lazy_static::lazy_static! {
@@ -47,14 +50,10 @@ lazy_static::lazy_static! {
     };
 }
 
-#[allow(missing_docs)]
-pub mod client;
 mod dns;
 mod error;
 mod parse;
-mod tls;
 
-pub use crate::client::Client;
 pub use crate::error::Error;
 
 /// An HTTP Request
@@ -91,6 +90,7 @@ impl Request {
     /// Adds a multipart/form-data body to an HTTP request, replacing the current body if one
     /// exists
     pub fn file_form(mut self, filename: &str, contents: &[u8]) -> Self {
+        use std::io::Write;
         let boundary = "BOUNDARYBOUNDARYBOUNDARY";
 
         // Write the contents of form into self.body
@@ -165,7 +165,12 @@ impl Request {
         &self.body
     }
 
-    fn write_to<W: std::io::Write>(&self, stream: &mut W) -> Result<(), Error> {
+    async fn write_to(
+        &self,
+        stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    ) -> Result<(), Error> {
+        use tokio::io::AsyncWriteExt;
+
         let host = self.uri().host().ok_or(Error::InvalidUrl)?;
         let path = self
             .uri()
@@ -174,26 +179,26 @@ impl Request {
             .unwrap_or("/");
 
         // Write the HTTP header
-        write!(
-            stream,
+        let buf = format!(
             "{} {} HTTP/1.1\r\n\
              Host: {}\r\n\
              Connection: close\r\n",
             self.method().as_str(),
             path,
             host
-        )?;
+        );
+        stream.write_all(buf.as_bytes()).await?;
 
         for (key, value) in self.headers() {
-            write!(stream, "{}: ", key)?;
-            stream.write_all(value.as_bytes())?;
-            stream.write_all(b"\r\n")?;
+            stream.write_all(key.as_str().as_bytes()).await?;
+            stream.write_all(b": ").await?;
+            stream.write_all(value.as_bytes()).await?;
+            stream.write_all(b"\r\n").await?;
         }
-
-        stream.write_all(b"\r\n")?;
+        stream.write_all(b"\r\n").await?;
 
         // Write the HTTP body
-        stream.write_all(self.body())?;
+        stream.write_all(self.body()).await?;
 
         Ok(())
     }
@@ -201,44 +206,35 @@ impl Request {
 
 /// Send an HTTPS request by creating a rustls ClientSession and driving it with blocking I/O on
 /// the current thread
-pub fn send(req: &Request) -> Result<Response, Error> {
-    use std::io::Read;
+pub async fn send(req: &Request) -> Result<Response, Error> {
+    use tokio::io::AsyncReadExt;
 
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
     let addr = match DNS_CACHE.lock() {
-        Ok(mut cache) => cache.lookup(host)?,
-        Err(_) => DnsCache::new().lookup(host)?,
+        Ok(mut cache) => cache.lookup(host).await?,
+        Err(_) => DnsCache::new().lookup(host).await?,
     };
 
     let scheme = req.uri().scheme().unwrap_or(&http::uri::Scheme::HTTPS);
+    if scheme != &http::uri::Scheme::HTTPS {
+        return Err(Error::UnsupportedScheme);
+    }
+
+    let port = req.uri().port_u16().unwrap_or(443);
+    let dns_name =
+        webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
+
+    let stream = tokio::net::TcpStream::connect((addr, port)).await?;
+    let connector = tokio_rustls::TlsConnector::from(TLS_CONFIG.clone());
+    let mut tls = connector.connect(dns_name, stream).await?;
+
+    req.write_to(&mut tls).await?;
 
     let mut raw = Vec::new();
-    if scheme == &http::uri::Scheme::HTTPS {
-        let port = req.uri().port_u16().unwrap_or(443);
-        let dns_name =
-            webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
-
-        let mut sock = std::net::TcpStream::connect((addr, port))?;
-        let mut sess = rustls::ClientSession::new(&TLS_CONFIG, dns_name);
-        let mut tls = rustls::Stream::new(&mut sess, &mut sock);
-
-        req.write_to(&mut tls)?;
-
-        if let Err(e) = tls.read_to_end(&mut raw) {
-            use std::error::Error;
-            if e.description() != "CloseNotify alert received" {
-                return Err(e.into());
-            }
+    if let Err(e) = tls.read_to_end(&mut raw).await {
+        if &e.to_string() != "CloseNotify alert received" {
+            return Err(e.into());
         }
-    } else if scheme == &http::uri::Scheme::HTTP {
-        let port = req.uri().port().map(|p| p.as_u16()).unwrap_or(80);
-        let mut stream = std::net::TcpStream::connect((addr, port))?;
-
-        req.write_to(&mut stream)?;
-
-        stream.read_to_end(&mut raw)?;
-    } else {
-        return Err(Error::UnsupportedScheme);
     }
 
     parse_response(&raw)
@@ -247,21 +243,29 @@ pub fn send(req: &Request) -> Result<Response, Error> {
 /// Send an HTTPS GET request
 ///
 /// ```rust
-/// let response = weeqwest::get("https://api.slack.com/api/api.test?foo=bar").unwrap();
+/// let request = weeqwest::get("https://api.slack.com/api/api.test?foo=bar");
+/// let response = tokio::runtime::Runtime::new()
+///    .unwrap()
+///    .block_on(request)
+///    .unwrap();
 /// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
 /// ```
-pub fn get(url: &str) -> Result<Response, Error> {
-    send(&Request::get(url)?)
+pub async fn get(url: &str) -> Result<Response, Error> {
+    send(&Request::get(url)?).await
 }
 
 /// Send an HTTPS POST request
 ///
 /// ```rust
-/// let response = weeqwest::post("https://api.slack.com/api/api.test?foo=bar").unwrap();
+/// let request = weeqwest::post("https://api.slack.com/api/api.test?foo=bar");
+/// let response = tokio::runtime::Runtime::new()
+///    .unwrap()
+///    .block_on(request)
+///    .unwrap();
 /// assert_eq!(b"{\"ok\":true,\"args\":{\"foo\":\"bar\"}}", response.body());
 /// ```
-pub fn post(url: &str) -> Result<Response, Error> {
-    send(&Request::post(url)?)
+pub async fn post(url: &str) -> Result<Response, Error> {
+    send(&Request::post(url)?).await
 }
 
 /// Parses a response from bytes
