@@ -10,15 +10,12 @@
 //! A wee HTTPS request library powered by rustls.
 //!
 //! `weeqwest` is inspired by and a reaction to `reqwest`, which is a
-//! wonderfully powerful library, but a user would be rightfully dismayed to
-//! learn they've pulled in 126 dependencies to send a single HTTP request.
+//! wonderfully powerful library, but has a dismaying large dependency tree,
+//! which can significantly impact the compile time and code size of projects.
 //! `weeqwest` aims to be good enough for common uses with a small dependency
-//! tree (currently 37 total dependencies) and at least as good performance.
-//! This library does not aim to be a total replacement, but an alternative for
-//! some use cases.
+//! tree and at least as good performance. This library does not aim to be
+//! a total replacement, but an alternative for some use cases.
 //!
-//! If you don't mind blocking, `weeqwest` provides free functions that will do
-//! blocking I/O on the current thread:
 //! ```rust
 //! let request = weeqwest::get("https://httpbin.org/get/");
 //! let response = tokio::runtime::Runtime::new()
@@ -28,9 +25,6 @@
 //! // Response body may not be UTF-8
 //! println!("body = {}", std::str::from_utf8(response.body()).unwrap());
 //! ```
-//!
-//! This crate also provides a `Client` for running multiple requests in
-//! parallel on a background thread.
 
 use crate::dns::DnsCache;
 use std::convert::TryFrom;
