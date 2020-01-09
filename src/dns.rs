@@ -2,8 +2,10 @@ use crate::parse::{CursorExt, ReadExt};
 use crate::Error;
 use std::collections::HashMap;
 use std::io::{self, Read};
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
+
+use tokio::net::UdpSocket;
 
 pub struct DnsCache {
     addrs: HashMap<String, DnsEntry>,
@@ -22,7 +24,7 @@ impl DnsCache {
         }
     }
 
-    pub fn lookup(&mut self, host: &str) -> Result<IpAddr, Error> {
+    pub async fn lookup(&mut self, host: &str) -> Result<IpAddr, Error> {
         if host == "localhost" {
             return Ok(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
         }
@@ -31,13 +33,13 @@ impl DnsCache {
             Some(entry) => {
                 // If the cache entry expired, replace it
                 if Instant::now() > entry.expiration {
-                    *entry = resolve(&host)?;
+                    *entry = resolve(&host).await?;
                 }
                 Ok(entry.address)
             }
             // If we don't, look it up and add a new cache entry
             None => {
-                let entry = resolve(&host)?;
+                let entry = resolve(&host).await?;
                 self.addrs.insert(host.to_string(), entry.clone());
                 Ok(entry.address)
             }
@@ -62,9 +64,12 @@ macro_rules! mask {
 }
 
 // TODO: Currently only works on ipv4 addrs
-fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
-    let sock = UdpSocket::bind("0.0.0.0:0")?;
-    sock.connect("8.8.8.8:53")?;
+async fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
+    let addr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+    let mut sock = UdpSocket::bind((addr, 0)).await?;
+
+    let addr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    sock.connect((addr, 53u16)).await?;
     let mut message = Vec::with_capacity(100);
     // UDP header
     message.extend_from_slice(&[
@@ -85,11 +90,10 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
     // QTYPE, QCLASS
     message.extend_from_slice(&[0, 1, 0, 1]);
 
-    sock.send(&message)?;
+    sock.send(&message).await?;
 
     let mut response = vec![0; 1024];
-
-    let bytes_read = sock.recv(response.as_mut_slice())?;
+    let bytes_read = sock.recv(response.as_mut_slice()).await?;
     response.truncate(bytes_read);
     let mut response = std::io::Cursor::new(response);
 
@@ -194,8 +198,11 @@ fn resolve(domain: &str) -> std::io::Result<DnsEntry> {
 
 mod tests {
     #[test]
-    fn resolve_ipv6() {
-        let addr = super::resolve("google.com").unwrap();
+    fn resolve_ipv4() {
+        let addr = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(super::resolve("google.com"))
+            .unwrap();
         println!("{:?}", addr);
     }
 }
