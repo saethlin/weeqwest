@@ -14,3 +14,4 @@ webpki = "0.21"
 webpki-roots = "0.18"
 tokio = {version = "0.2", features = ["tcp", "io-util", "udp", "rt-core"]}
 tokio-rustls = "0.12"
+futures-util = {version = "0.3", default-features = false, features=["std"]}

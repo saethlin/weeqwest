@@ -28,7 +28,8 @@
 
 use crate::dns::DnsCache;
 use std::convert::TryFrom;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
+use futures_util::lock::Mutex;
 
 lazy_static::lazy_static! {
     static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
@@ -204,9 +205,9 @@ pub async fn send(req: &Request) -> Result<Response, Error> {
     use tokio::io::AsyncReadExt;
 
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
-    let addr = match DNS_CACHE.lock() {
-        Ok(mut cache) => cache.lookup(host).await?,
-        Err(_) => DnsCache::new().lookup(host).await?,
+    let addr = match DNS_CACHE.try_lock() {
+        Some(mut cache) => cache.lookup(host).await?,
+        None => DnsCache::new().lookup(host).await?,
     };
 
     let scheme = req.uri().scheme().unwrap_or(&http::uri::Scheme::HTTPS);
