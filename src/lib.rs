@@ -202,6 +202,7 @@ impl Request {
 /// Send an HTTPS request by creating a rustls ClientSession and driving it with blocking I/O on
 /// the current thread
 pub async fn send(req: &Request) -> Result<Response, Error> {
+    use tokio::io::AsyncWriteExt;
     use tokio::io::AsyncReadExt;
 
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
@@ -216,14 +217,14 @@ pub async fn send(req: &Request) -> Result<Response, Error> {
     }
 
     let port = req.uri().port_u16().unwrap_or(443);
+    let stream = tokio::net::TcpStream::connect((addr, port)).await?;
     let dns_name =
         webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
-
-    let stream = tokio::net::TcpStream::connect((addr, port)).await?;
     let connector = tokio_rustls::TlsConnector::from(TLS_CONFIG.clone());
     let mut tls = connector.connect(dns_name, stream).await?;
 
     req.write_to(&mut tls).await?;
+    tls.flush().await?;
 
     let mut raw = Vec::new();
     if let Err(e) = tls.read_to_end(&mut raw).await {
