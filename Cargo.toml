@@ -9,9 +9,9 @@ httparse = "1.0"
 http = "0.2"
 libflate = "0.1"
 lazy_static = "1.0"
-rustls = {version = "0.16", default-features = false}
+rustls = {version = "0.17", default-features = false}
 webpki = "0.21"
-webpki-roots = "0.18"
+webpki-roots = "0.19"
 tokio = {version = "0.2", features = ["tcp", "io-util", "udp", "rt-core"]}
-tokio-rustls = "0.12"
+tokio-rustls = "0.13"
 futures-util = {version = "0.3", default-features = false, features=["std"]}
