@@ -27,15 +27,14 @@
 //! ```
 
 use crate::dns::DnsCache;
-use std::convert::TryFrom;
-use std::sync::{Arc};
 use futures_util::lock::Mutex;
+use std::convert::TryFrom;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 lazy_static::lazy_static! {
     static ref DNS_CACHE: Arc<Mutex<DnsCache>> = Arc::new(Mutex::new(DnsCache::new()));
-}
 
-lazy_static::lazy_static! {
     static ref TLS_CONFIG: Arc<rustls::ClientConfig> = {
         let mut config = rustls::ClientConfig::new();
         config
@@ -43,6 +42,8 @@ lazy_static::lazy_static! {
             .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
         Arc::new(config)
     };
+
+    static ref CONNECTION_POOL: Arc<Mutex<Vec<(SocketAddr, tokio_rustls::client::TlsStream<tokio::net::TcpStream>)>>> = Arc::new(Mutex::new(Vec::new()));
 }
 
 mod dns;
@@ -177,7 +178,7 @@ impl Request {
         let buf = format!(
             "{} {} HTTP/1.1\r\n\
              Host: {}\r\n\
-             Connection: close\r\n",
+             Connection: Keep-Alive\r\n",
             self.method().as_str(),
             path,
             host
@@ -202,14 +203,11 @@ impl Request {
 /// Send an HTTPS request by creating a rustls ClientSession and driving it with blocking I/O on
 /// the current thread
 pub async fn send(req: &Request) -> Result<Response, Error> {
-    use tokio::io::AsyncWriteExt;
     use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
 
     let host = req.uri().host().ok_or(Error::InvalidUrl)?;
-    let addr = match DNS_CACHE.try_lock() {
-        Some(mut cache) => cache.lookup(host).await?,
-        None => DnsCache::new().lookup(host).await?,
-    };
+    let ip_addr = DNS_CACHE.lock().await.lookup(host).await?;
 
     let scheme = req.uri().scheme().unwrap_or(&http::uri::Scheme::HTTPS);
     if scheme != &http::uri::Scheme::HTTPS {
@@ -217,11 +215,21 @@ pub async fn send(req: &Request) -> Result<Response, Error> {
     }
 
     let port = req.uri().port_u16().unwrap_or(443);
-    let stream = tokio::net::TcpStream::connect((addr, port)).await?;
-    let dns_name =
-        webpki::DNSNameRef::try_from_ascii_str(host).map_err(|_| Error::InvalidHostname)?;
-    let connector = tokio_rustls::TlsConnector::from(TLS_CONFIG.clone());
-    let mut tls = connector.connect(dns_name, stream).await?;
+    let socket_addr = std::net::SocketAddr::new(ip_addr, port);
+
+    let mut tls = {
+        let mut pool = CONNECTION_POOL.lock().await;
+        match pool.iter().position(|s| s.0 == socket_addr) {
+            Some(index) => pool.remove(index).1,
+            None => {
+                let stream = tokio::net::TcpStream::connect(socket_addr).await?;
+                let dns_name = webpki::DNSNameRef::try_from_ascii_str(host)
+                    .map_err(|_| Error::InvalidHostname)?;
+                let connector = tokio_rustls::TlsConnector::from(TLS_CONFIG.clone());
+                connector.connect(dns_name, stream).await?
+            }
+        }
+    };
 
     req.write_to(&mut tls).await?;
     tls.flush().await?;
@@ -233,7 +241,11 @@ pub async fn send(req: &Request) -> Result<Response, Error> {
         }
     }
 
-    parse_response(&raw)
+    let response = parse_response(&raw);
+
+    CONNECTION_POOL.lock().await.push((socket_addr, tls));
+
+    response
 }
 
 /// Send an HTTPS GET request
